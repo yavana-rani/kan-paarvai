@@ -1,10 +1,8 @@
+
 fastapi
 uvicorn
 requests
 python-multipart
-easyocr
-fpdf2
 pillow
+pytesseract
 openai
-httpx
-python-dotenv
