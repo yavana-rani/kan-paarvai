@@ -3,5 +3,3 @@ uvicorn
 requests
 python-multipart
 pillow
-pytesseract
-openai
