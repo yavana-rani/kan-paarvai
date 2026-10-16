@@ -1,3 +1,4 @@
+from fastapi.responses import HTMLResponse
 from fastapi import FastAPI, Request, BackgroundTasks
 import requests, base64, os
 import openai
@@ -81,13 +82,40 @@ def handle_image(from_number, image_id):
 async def home():
     return {"status": "Kan Paarvai Live"}
 
-@app.get("/privacy")
+@app.get("/privacy", response_class=HTMLResponse)
 async def privacy():
-    return {"privacy": "We don't store photos. Used only for reading help."}
+    return """
+    <html><head><title>Privacy Policy - Kan Paarvai</title></head>
+    <body>
+    <h1>Privacy Policy for Kan Paarvai</h1>
+    <p>Last updated: 2026</p>
+    <p>Kan Paarvai is a WhatsApp assistant to help visually impaired users read images.</p>
+    <p><b>We do NOT store photos.</b> Images are processed temporarily to generate a text description and then deleted immediately. We do not save, sell, or share user data.</p>
+    <p>Contact: murugesvarisangaranarayanan1@gmail.com</p>
+    </body></html>
+    """
 
-@app.get("/terms")
+@app.get("/terms", response_class=HTMLResponse)
 async def terms():
-    return {"terms": "Kan Paarvai is for assistance only."}
+    return """
+    <html><head><title>Terms - Kan Paarvai</title></head>
+    <body>
+    <h1>Terms of Service - Kan Paarvai</h1>
+    <p>Kan Paarvai provides image reading assistance for accessibility purposes only. The AI description may not be 100% accurate. Users should verify critical information.</p>
+    <p>By using this service, you agree not to upload illegal or sensitive personal content.</p>
+    <p>Contact: murugesvarisangaranarayanan1@gmail.com</p>
+    </body></html>
+    """
+
+@app.get("/data-deletion", response_class=HTMLResponse)
+async def data_deletion():
+    return """
+    <html><body>
+    <h1>Data Deletion Instructions</h1>
+    <p>To request deletion of your data, email us at murugesvarisangaranarayanan1@gmail.com with your WhatsApp number. We will delete all associated data within 7 days.</p>
+    <p>Since we do not store photos, there is no photo data to delete by default.</p>
+    </body></html>
+    """
 
 @app.post("/webhook")
 async def incoming(request: Request, bg: BackgroundTasks):
