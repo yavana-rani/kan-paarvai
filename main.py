@@ -1,101 +1,122 @@
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, PlainTextResponse
-import os, requests, base64
-from openai import OpenAI
+from fastapi import FastAPI, Request, BackgroundTasks
+import requests, base64, os
+import openai
 
 app = FastAPI()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123")
+API = "https://graph.facebook.com/v21.0"
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-@app.get("/")
-def home():
-    return {"status": "Kan Paarvai Live - Ready for blind users"}
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-# === ADD THIS FOR META LIVE APPROVAL ===
-@app.get("/privacy", response_class=HTMLResponse)
-def privacy():
-    return """
-    <html><body style="font-family:Arial; padding:20px; max-width:800px;">
-    <h1>Privacy Policy - Kan Paarvai</h1>
-    <p><b>Updated: 16 Oct 2026</b></p>
-    <p>Kan Paarvai helps blind users in Tamil Nadu describe photos via WhatsApp.</p>
-    <p><b>Data:</b> WhatsApp messages & photos sent for description.</p>
-    <p><b>Use:</b> AI describes image in Tamil/English and replies back.</p>
-    <p><b>Storage:</b> NO photo storage. Deleted after processing. No third-party share.</p>
-    <p><b>Contact:</b> murrugeswarisangaranarayanan1@gmail.com, Virudhunagar, TN</p>
-    <p><a href="/terms">Terms</a></p>
-    </body></html>
-    """
-
-@app.get("/terms", response_class=HTMLResponse)
-def terms():
-    return """
-    <html><body style="font-family:Arial; padding:20px; max-width:800px;">
-    <h1>Terms and Conditions - Kan Paarvai</h1>
-    <p><b>Updated: 16 Oct 2026</b></p>
-    <p>1. Free service for visually impaired to read documents.</p>
-    <p>2. AI may be wrong. Don't use for road crossing, medicine, driving.</p>
-    <p>3. Don't send illegal/private photos of others.</p>
-    <p>4. No data stored, photos deleted instantly.</p>
-    <p>5. Free server, may have delays.</p>
-    <p>Contact: murrugeswarisangaranarayanan1@gmail.com</p>
-    <p><a href="/privacy">Privacy Policy</a></p>
-    </body></html>
-    """
-
-@app.get("/webhook")
-def verify(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return PlainTextResponse(challenge) # Fixed: was int()
-    return PlainTextResponse("Failed", status_code=403)
+H = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
 
 def send_whatsapp(to, text):
-    requests.post(f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages",
-        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}","Content-Type":"application/json"},
-        json={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":text}}
-    )
+    # WhatsApp max 4096 chars
+    for i in range(0, len(text), 4000):
+        chunk = text[i:i+4000]
+        try:
+            r = requests.post(
+                f"{API}/{PHONE_NUMBER_ID}/messages",
+                headers={**H, "Content-Type": "application/json"},
+                json={
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "text",
+                    "text": {"body": chunk}
+                },
+                timeout=20
+            )
+            print(f"SEND {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            print(f"Send failed: {e}")
+
+def handle_image(from_number, image_id):
+    try:
+        # 1. Get image URL from Meta
+        info = requests.get(f"{API}/{image_id}", headers=H, timeout=20).json()
+        print("Image info:", info)
+        
+        # 2. Download image
+        img_bytes = requests.get(info["url"], headers=H, timeout=30).content
+        
+        # 3. Limit size - compress if > 4MB
+        if len(img_bytes) > 4 * 1024 * 1024:
+            print("Image too big, skipping")
+            send_whatsapp(from_number, "Photo romba perisu. Konjam chinna photo anupunga.")
+            return
+
+        b64 = base64.b64encode(img_bytes).decode()
+
+        # 4. Vision call - Kan Paarvai prompt
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            timeout=60,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "You are Kan Paarvai, a helpful Tamil eye assistant. Explain what you see in this image in simple Tamil (Tanglish ok). Be kind, clear, short."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                        }
+                    ]
+                }
+            ]
+        )
+        answer = resp.choices[0].message.content
+        send_whatsapp(from_number, answer)
+
+    except Exception as e:
+        print(f"Image handle error: {e}")
+        send_whatsapp(from_number, "Mannikkavum, photo padikka mudiyavillai. Meendum anupunga.")
+
+@app.get("/")
+async def home():
+    return {"status": "Kan Paarvai Live"}
+
+@app.get("/privacy")
+async def privacy():
+    return {"privacy": "We don't store photos. Used only for reading help."}
+
+@app.get("/terms")
+async def terms():
+    return {"terms": "Kan Paarvai is for assistance only."}
 
 @app.post("/webhook")
-async def incoming(request: Request):
+async def incoming(request: Request, bg: BackgroundTasks):
     body = await request.json()
-    print("INCOMING:", body)
+    print("Webhook:", body)
     try:
-        entry = body['entry'][0]['changes'][0]['value']
-        if 'messages' not in entry:
+        value = body["entry"][0]["changes"][0]["value"]
+        if "messages" not in value:
             return {"ok": True}
-        msg = entry['messages'][0]
-        from_number = msg['from']
+        
+        msg = value["messages"][0]
+        from_number = msg["from"]
 
-        # 1. If user sends Hi / text
-        if msg['type'] == 'text':
-            text = msg['text']['body'].lower()
-            welcome = "Vanakkam! 🙏 Naan Kan Paarvai. Kangal theriyatha ungalukku uthavi seiyya vanthen. Oru photo anupunga, athil enna irukku endru Tamilil solluven. / Hello! I am Kan Paarvai. Send me a photo/document, I will read it for you in Tamil."
-            send_whatsapp(from_number, welcome)
-            return {"ok": True}
+        if msg["type"] == "image":
+            image_id = msg["image"]["id"]
+            bg.add_task(handle_image, from_number, image_id)
+        else:
+            bg.add_task(send_whatsapp, from_number, "Vanakkam! 🙏 Photo anupunga, naan padichu solren. Kan Paarvai ungalukkaga.")
 
-        # 2. If user sends image
-        if msg['type'] == 'image':
-            image_id = msg['image']['id']
-            url_info = requests.get(f"https://graph.facebook.com/v19.0/{image_id}", headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).json()
-            img_url = url_info['url']
-            img_data = requests.get(img_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
-
-            b64 = base64.b64encode(img_data).decode()
-            resp = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role":"user","content":[
-                    {"type":"text","text":"You are Kan Paarvai, helper for blind Tamil users. Read this document clearly. Extract all text, then explain in simple Tamil + English what it is, what to do. Be kind, clear, short."},
-                    {"type":"image_url","image_url":{"url": f"data:image/jpeg;base64,{b64}"}}
-                ]}]
-            )
-            answer = resp.choices[0].message.content
-            send_whatsapp(from_number, answer)
     except Exception as e:
-        print("Error:", e)
+        print(f"Webhook error: {e}")
+    
+    # MUST return fast within 2 sec, else Facebook retries
     return {"ok": True}
+
+@app.get("/webhook")
+async def verify(request: Request):
+    # For Meta verification
+    params = request.query_params
+    if params.get("hub.verify_token") == os.getenv("VERIFY_TOKEN", "kanpaarvai123"):
+        return int(params.get("hub.challenge", 0))
+    return {"error": "Verification failed"}
