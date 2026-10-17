@@ -7,7 +7,7 @@ from fastapi import FastAPI
 app = FastAPI(docs_url=None, redoc_url=None)
 
 # Allow HEAD requests
-@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/", methods=["GET","HEAD"])
 async def root():
     return {"status": "Kan Paarvai is live!", "message": "Send WhatsApp image to get help"}
 app = FastAPI()
