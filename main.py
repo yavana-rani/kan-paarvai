@@ -13,8 +13,9 @@ async def root():
 app = FastAPI()
 
 API = "https://graph.facebook.com/v21.0"
-WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
-PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123").strip()
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "").strip()
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
