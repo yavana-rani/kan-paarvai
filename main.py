@@ -2,7 +2,14 @@ from fastapi.responses import HTMLResponse
 from fastapi import FastAPI, Request, BackgroundTasks
 import requests, base64, os
 import openai
+from fastapi import FastAPI
 
+app = FastAPI(docs_url=None, redoc_url=None)
+
+# Allow HEAD requests
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root():
+    return {"status": "Kan Paarvai is live!", "message": "Send WhatsApp image to get help"}
 app = FastAPI()
 
 API = "https://graph.facebook.com/v21.0"
