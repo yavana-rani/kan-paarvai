@@ -1,6 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 requests
-python-multipart
-pillow
 openai
+python-multipart
