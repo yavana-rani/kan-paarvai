@@ -4,7 +4,8 @@ import requests, base64, os, io
 import openai
 from gtts import gTTS
 from fpdf import FPDF
-
+from fastapi.staticfiles import StaticFiles
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app = FastAPI(docs_url=None, redoc_url=None)
 from fastapi import Request
 
