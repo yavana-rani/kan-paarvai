@@ -210,7 +210,9 @@ async def data_deletion(): return "<html><body><h1>Delete</h1><p>Email kanpaarva
 
 @app.post("/webhook")
 async def incoming(request: Request, bg: BackgroundTasks):
+    print("=== WEBHOOK POST RECEIVED ===", flush=True)
     body = await request.json()
+    print(body, flush=True)
     try:
         value = body["entry"][0]["changes"][0]["value"]
         if "messages" not in value: return {"ok": True}
