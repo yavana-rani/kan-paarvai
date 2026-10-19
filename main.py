@@ -1,33 +1,27 @@
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi.staticfiles import StaticFiles
+from fastapi import Response
 import requests, base64, os, io
 import openai
 from gtts import gTTS
 from fpdf import FPDF
-from fastapi.staticfiles import StaticFiles
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# --- Create folders first ---
+os.makedirs("static", exist_ok=True)
+os.makedirs("static/audio", exist_ok=True)
+os.makedirs("/tmp", exist_ok=True)
+
 app = FastAPI(docs_url=None, redoc_url=None)
-from fastapi import Request
 
-@app.get("/webhook")
-def verify_webhook(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
-    
-    print(f"VERIFY ATTEMPT: received='{token}' expected='{VERIFY_TOKEN}' mode={mode}")
+# Mount static AFTER app created
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        print("VERIFY SUCCESS!")
-        return int(challenge) if challenge else challenge
-    else:
-        print("VERIFY FAILED")
-        return Response(content="Verification failed", status_code=403)
-
+# --- Config ---
 API = "https://graph.facebook.com/v22.0"
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()  # Get from sarvam.ai
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
 
 client = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=60.0)
 
@@ -44,8 +38,6 @@ def ensure_tamil_font():
                 with open(FONT_PATH, "wb") as f:
                     f.write(r.content)
                 print("Tamil font downloaded")
-            else:
-                print(f"Font download failed {r.status_code}")
         except Exception as e:
             print(f"Font download error: {e}")
 
@@ -101,10 +93,8 @@ def send_whatsapp_pdf(to, pdf_bytes, filename="KanPaarvai.pdf"):
     requests.post(f"{API}/{phone_id}/messages", headers=headers,
         json={"messaging_product": "whatsapp","to": to,"type": "document","document": {"id": media_id, "filename": filename}}, timeout=20)
 
-# --- 1. SARVAM AI TAMIL VOICE (Best) + gTTS Fallback ---
 def create_tamil_voice(text):
-    short_text = text[:500]  # Sarvam limit
-    # Try Sarvam AI first
+    short_text = text[:500]
     if SARVAM_API_KEY:
         try:
             print("Trying Sarvam AI Tamil voice...")
@@ -114,29 +104,21 @@ def create_tamil_voice(text):
                 json={
                     "inputs": [short_text],
                     "target_language_code": "ta-IN",
-                    "speaker": "meera",  # meera = natural Tamil female
-                    "pitch": 0,
-                    "pace": 1.0,
-                    "loudness": 1.0,
+                    "speaker": "meera",
+                    "pitch": 0, "pace": 1.0, "loudness": 1.0,
                     "speech_sample_rate": 8000,
                     "enable_preprocessing": True,
                     "model": "bulbul:v2"
-                },
-                timeout=30
+                }, timeout=30
             )
-            print(f"Sarvam status {resp.status_code}")
             if resp.status_code == 200:
                 data = resp.json()
-                # Sarvam returns base64 audio
                 audio_b64 = data.get("audios", [None])[0]
                 if audio_b64:
-                    import base64 as b64lib
-                    return b64lib.b64decode(audio_b64)
-            print(f"Sarvam failed: {resp.text[:500]}")
+                    return base64.b64decode(audio_b64)
         except Exception as e:
             print(f"Sarvam error: {e}")
 
-    # Fallback to gTTS Tamil
     try:
         print("Fallback to gTTS Tamil")
         tts = gTTS(text=short_text, lang='ta', slow=False)
@@ -148,14 +130,11 @@ def create_tamil_voice(text):
         print(f"TTS error: {e}")
         return None
 
-# --- 2. PERFECT TAMIL PDF WITH NOTO FONT ---
 def create_tamil_pdf(content, title="Kan Paarvai - Paarvai Araikkai"):
     try:
         pdf = FPDF()
         pdf.add_page()
         pdf.set_auto_page_break(auto=True, margin=15)
-
-        # Add Tamil Font if downloaded
         has_tamil_font = os.path.exists(FONT_PATH)
         if has_tamil_font:
             try:
@@ -163,34 +142,24 @@ def create_tamil_pdf(content, title="Kan Paarvai - Paarvai Araikkai"):
                 pdf.set_font("NotoTamil", '', 14)
             except:
                 has_tamil_font = False
-        
         if not has_tamil_font:
             pdf.set_font("Arial", 'B', 14)
-
         pdf.cell(0, 12, title, ln=True, align='C')
         pdf.ln(8)
-
         if has_tamil_font:
             pdf.set_font("NotoTamil", '', 11)
         else:
             pdf.set_font("Arial", '', 11)
-
-        # FPDF uni=True supports Unicode Tamil now
         pdf.multi_cell(0, 7, content)
-
         pdf.ln(10)
         pdf.set_font("Arial", 'I', 8)
         pdf.cell(0, 10, "Generated by Kan Paarvai | Photos not stored | Privacy safe", ln=True, align='C')
-
-        # Output as bytes
         out = pdf.output(dest='S')
         if isinstance(out, str):
             return out.encode('latin-1')
         return bytes(out)
     except Exception as e:
         print(f"PDF error: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
 def handle_image(from_number, image_id):
@@ -200,12 +169,10 @@ def handle_image(from_number, image_id):
         if "url" not in info:
             send_whatsapp(from_number, "Photo URL kidaikkavillai. Meendum anupunga.")
             return
-        
         img_bytes = requests.get(info["url"], headers=headers, timeout=30).content
         if len(img_bytes) > 4 * 1024 * 1024:
             send_whatsapp(from_number, "Photo romba perisu. Chinna photo anupunga.")
             return
-
         b64 = base64.b64encode(img_bytes).decode()
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -215,21 +182,15 @@ def handle_image(from_number, image_id):
             ]}]
         )
         answer = resp.choices[0].message.content
-        
         send_whatsapp(from_number, answer)
-
-        # Voice
         voice_bytes = create_tamil_voice(answer)
         if voice_bytes:
             send_whatsapp_audio(from_number, voice_bytes)
             send_whatsapp(from_number, "🔊 Mela ulla voice-ai ketkavum")
-
-        # PDF
         pdf_bytes = create_tamil_pdf(answer)
         if pdf_bytes:
             send_whatsapp_pdf(from_number, pdf_bytes, filename="KanPaarvai_Tamil_Report.pdf")
             send_whatsapp(from_number, "📄 PDF report-um anuppi ullen")
-
     except Exception as e:
         print(f"Image handle error: {e}")
         send_whatsapp(from_number, "Mannikkavum, photo padikka mudiyavillai.")
@@ -239,11 +200,13 @@ async def home():
     return {"status": "Kan Paarvai LIVE","tamil_font": os.path.exists(FONT_PATH),"sarvam": bool(SARVAM_API_KEY)}
 
 @app.get("/privacy", response_class=HTMLResponse)
-async def privacy(): return "<html><body><h1>Privacy</h1><p>Photos not stored.</p></body></html>"
+async def privacy(): return "<html><body><h1>Privacy</h1><p>Photos not stored. Deleted in 24h.</p></body></html>"
+
 @app.get("/terms", response_class=HTMLResponse)
 async def terms(): return "<html><body><h1>Terms</h1><p>Accessibility only.</p></body></html>"
+
 @app.get("/data-deletion", response_class=HTMLResponse)
-async def data_deletion(): return "<html><body><h1>Delete</h1><p>Email to delete.</p></body></html>"
+async def data_deletion(): return "<html><body><h1>Delete</h1><p>Email kanpaarvai.help@gmail.com to delete.</p></body></html>"
 
 @app.post("/webhook")
 async def incoming(request: Request, bg: BackgroundTasks):
@@ -264,6 +227,10 @@ async def incoming(request: Request, bg: BackgroundTasks):
 @app.get("/webhook")
 async def verify(request: Request):
     params = request.query_params
-    if params.get("hub.verify_token") == VERIFY_TOKEN:
+    token = params.get("hub.verify_token")
+    print(f"VERIFY ATTEMPT: received='{token}' expected='{VERIFY_TOKEN}'")
+    if params.get("hub.mode") == "subscribe" and token == VERIFY_TOKEN:
+        print("VERIFY SUCCESS!")
         return PlainTextResponse(content=params.get("hub.challenge", "0"), status_code=200)
+    print("VERIFY FAILED")
     return PlainTextResponse("Verification failed", status_code=403)
