@@ -6,17 +6,22 @@ from gtts import gTTS
 from fpdf import FPDF
 
 app = FastAPI(docs_url=None, redoc_url=None)
+from fastapi import Request
+
 @app.get("/webhook")
-async def verify(request: Request):
-    params = request.query_params
-    received = params.get("hub.verify_token", "")
-    expected = VERIFY_TOKEN
-    print(f"VERIFY ATTEMPT: received='{received}' expected='{expected}'")
-    if received == expected:
-        print("VERIFY SUCCESS")
-        return PlainTextResponse(content=params.get("hub.challenge", "0"), status_code=200)
-    print("VERIFY FAILED")
-    return PlainTextResponse("Verification failed", status_code=403)
+def verify_webhook(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    
+    print(f"VERIFY ATTEMPT: received='{token}' expected='{VERIFY_TOKEN}' mode={mode}")
+
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        print("VERIFY SUCCESS!")
+        return int(challenge) if challenge else challenge
+    else:
+        print("VERIFY FAILED")
+        return Response(content="Verification failed", status_code=403)
 
 API = "https://graph.facebook.com/v22.0"
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123").strip()
