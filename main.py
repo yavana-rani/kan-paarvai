@@ -9,6 +9,44 @@ from fpdf import FPDF
 import base64
 import requests
 
+import google.generativeai as genai
+import os
+import requests
+from PIL import Image
+from io import BytesIO
+
+# Configure Gemini once at top of file (after imports)
+genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+
+def handle_image_with_gemini(image_id, whatsapp_token, phone_number_id):
+    try:
+        # 1. Get image URL from WhatsApp
+        url = f"https://graph.facebook.com/v19.0/{image_id}/"
+        headers = {"Authorization": f"Bearer {whatsapp_token}"}
+        resp = requests.get(url, headers=headers).json()
+        image_url = resp.get("url")
+        
+        # 2. Download image
+        img_data = requests.get(image_url, headers=headers).content
+        image = Image.open(BytesIO(img_data))
+        
+        # 3. Ask Gemini in Tamil
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = """
+        You are Kan Paarvai - AI for visually impaired Tamil people.
+        Describe this image in simple Tamil (2-3 lines).
+        Mention objects, danger if any, and location.
+        If image has link/QR/malware, say 'Echcharikkai!'
+        """
+        
+        response = model.generate_content([prompt, image])
+        tamil_text = response.text
+        
+        return tamil_text
+        
+    except Exception as e:
+        print(f"Image handle error: {e}")
+        return "Mannikkavum, photo padikka mudiyavillai. Meendum muyarchikkavum."
    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
 def handle_image(phone: str, image_id: str):
     print(f"Handling image {image_id}", flush=True)
