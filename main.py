@@ -226,6 +226,25 @@ async def incoming(request: Request, bg: BackgroundTasks):
         print(f"Webhook error: {e}")
     return {"ok": True}
 
+@app.get("/test-whatsapp")
+async def test_whatsapp(phone: str = "918248926187", msg: str = "Vanakkam! Kan Paarvai test"):
+    """Test without Meta - call from browser"""
+    print(f"=== TEST TRIGGER to {phone}: {msg} ===", flush=True)
+    try:
+        send_whatsapp(phone, msg)
+        voice = create_tamil_voice(msg)
+        if voice:
+            send_whatsapp_audio(phone, voice)
+        return {"status": "sent", "to": phone, "message": msg, "voice": bool(voice)}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/test-image/{image_id}")
+async def test_image(image_id: str, phone: str = "918248926187"):
+    """Test image handling with real image_id"""
+    print(f"=== TEST IMAGE {image_id} to {phone} ===", flush=True)
+    handle_image(phone, image_id)
+    return {"status": "processing", "image_id": image_id, "to": phone}
 @app.get("/webhook")
 async def verify(request: Request):
     params = request.query_params
