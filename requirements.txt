@@ -4,3 +4,4 @@ requests
 openai
 gtts
 fpdf2
+google-generativeai
