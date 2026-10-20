@@ -1,162 +1,42 @@
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.staticfiles import StaticFiles
-from fastapi import Response
 import requests, base64, os, io
-import openai
 from gtts import gTTS
 from fpdf import FPDF
-import base64
-import requests
-
 import google.generativeai as genai
-import os
-import requests
 from PIL import Image
 from io import BytesIO
 
-# Configure Gemini once at top of file (after imports)
-genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
-
-def handle_image_with_gemini(image_id, whatsapp_token, phone_number_id):
-    try:
-        # 1. Get image URL from WhatsApp
-        url = f"https://graph.facebook.com/v19.0/{image_id}/"
-        headers = {"Authorization": f"Bearer {whatsapp_token}"}
-        resp = requests.get(url, headers=headers).json()
-        image_url = resp.get("url")
-        
-        # 2. Download image
-        img_data = requests.get(image_url, headers=headers).content
-        image = Image.open(BytesIO(img_data))
-        
-        # 3. Ask Gemini in Tamil
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = """
-        You are Kan Paarvai - AI for visually impaired Tamil people.
-        Describe this image in simple Tamil (2-3 lines).
-        Mention objects, danger if any, and location.
-        If image has link/QR/malware, say 'Echcharikkai!'
-        """
-        
-        response = model.generate_content([prompt, image])
-        tamil_text = response.text
-        
-        return tamil_text
-        
-    except Exception as e:
-        print(f"Image handle error: {e}")
-        return "Mannikkavum, photo padikka mudiyavillai. Meendum muyarchikkavum."
-   headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-def handle_image(phone: str, image_id: str):
-    print(f"Handling image {image_id}", flush=True)
-    image_bytes = download_image(image_id)
-    if not image_bytes:
-        send_whatsapp(phone, "Padam pathivirakka mudiyavillai. Meendum muyarchikkavum")
-        return
-
-    # === SAFETY CHECK ===
-    unsafe, tamil_alert = is_unsafe_image(image_bytes)
-    if unsafe:
-        print(f"Blocked unsafe image: {tamil_alert}", flush=True)
-        send_whatsapp(phone, f"⚠️ {tamil_alert}")
-        voice = create_tamil_voice(tamil_alert)
-        if voice:
-            send_whatsapp_audio(phone, voice)
-        return  # STOP - don't process further
-    
-    if tamil_alert == "blurry":
-        msg = "Padam migavum iruttaga ullathu. Vilakku potu, thelivaga oru padam edukkavum"
-        send_whatsapp(phone, msg)
-        voice = create_tamil_voice(msg)
-        if voice:
-            send_whatsapp_audio(phone, voice)
-        # continue anyway or return - your choice
-def is_unsafe_image(image_bytes: bytes) -> tuple[bool, str]:
-    """
-    Check if image is malware / inappropriate / not useful
-    Returns: (is_unsafe, reason_tamil)
-    """
-    try:
-        # 1. Basic file check - too small or not image
-        if len(image_bytes) < 1024:
-            return True, "Padam alavu migach siriyathu. Thelivana padam edukkavum"
-
-        # 2. Use OpenAI Vision to classify
-        b64 = base64.b64encode(image_bytes).decode()
-        resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": 
-                     "Classify this image for a blind assistance app. "
-                     "Is it unsafe? Check: porn/nudity, gore, weapon, QR code promising free money/hack, "
-                     "malware screenshot, abuse, or completely black/blurry with no info. "
-                     "Reply ONLY JSON: {\"unsafe\": true/false, \"reason_en\": \"short reason\"} "
-                     "If unsafe = true for NSFW/malware/scams. If just blurry/dark, unsafe=false but reason_en='blurry'"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]
-            }],
-            max_tokens=100
-        )
-        import json
-        result = json.loads(resp.choices[0].message.content)
-        
-        if result.get("unsafe"):
-            # Map to Tamil alert
-            reason = result.get("reason_en","unsafe")
-            if "porn" in reason.lower() or "nude" in reason.lower():
-                tamil = "Ethu thagatha padam. Ithu thavirka pattathu"
-            elif "malware" in reason.lower() or "qr" in reason.lower() or "scam" in reason.lower():
-                tamil = "Echcharikkai! Ithu mosadi padam pola therigirathu. Click pannatheenga. Padathil mosamana thagaval irukkalam"
-            else:
-                tamil = f"Echcharikkai! Ithu pathukappatra padam alla: {reason}"
-            return True, tamil
-        
-        # 3. If blurry/dark - not unsafe but warn
-        if "blurry" in result.get("reason_en","").lower():
-            return False, "blurry"  # special handle
-            
-        return False, ""
-    except Exception as e:
-        print(f"Safety check failed: {e}", flush=True)
-        return False, ""  # fail open - don't block if check fails
-
-# --- Create folders first ---
+# --- Folders ---
 os.makedirs("static", exist_ok=True)
 os.makedirs("static/audio", exist_ok=True)
 os.makedirs("/tmp", exist_ok=True)
 
 app = FastAPI(docs_url=None, redoc_url=None)
-
-# Mount static AFTER app created
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # --- Config ---
 API = "https://graph.facebook.com/v22.0"
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
 
-client = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=60.0)
+# Gemini config
+genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "")
+gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 
-# --- Tamil Font Auto-Download ---
+# --- Tamil Font ---
 FONT_PATH = "/tmp/NotoSansTamil-Regular.ttf"
 FONT_URL = "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansTamil/NotoSansTamil-Regular.ttf"
-
 def ensure_tamil_font():
     if not os.path.exists(FONT_PATH):
         try:
-            print("Downloading Tamil font...")
             r = requests.get(FONT_URL, timeout=30)
             if r.status_code == 200:
                 with open(FONT_PATH, "wb") as f:
                     f.write(r.content)
-                print("Tamil font downloaded")
         except Exception as e:
-            print(f"Font download error: {e}")
-
+            print(f"Font error: {e}")
 ensure_tamil_font()
 
 def get_headers():
@@ -234,9 +114,7 @@ def create_tamil_voice(text):
                     return base64.b64decode(audio_b64)
         except Exception as e:
             print(f"Sarvam error: {e}")
-
     try:
-        print("Fallback to gTTS Tamil")
         tts = gTTS(text=short_text, lang='ta', slow=False)
         mp3_fp = io.BytesIO()
         tts.write_to_fp(mp3_fp)
@@ -278,26 +156,43 @@ def create_tamil_pdf(content, title="Kan Paarvai - Paarvai Araikkai"):
         print(f"PDF error: {e}")
         return None
 
-def handle_image(from_number, image_id):
+def download_image(image_id):
     try:
         headers = get_headers()
         info = requests.get(f"{API}/{image_id}", headers=headers, timeout=20).json()
+        print(f"Image info: {info}")
         if "url" not in info:
-            send_whatsapp(from_number, "Photo URL kidaikkavillai. Meendum anupunga.")
-            return
+            return None
         img_bytes = requests.get(info["url"], headers=headers, timeout=30).content
+        return img_bytes
+    except Exception as e:
+        print(f"Download error: {e}")
+        return None
+
+def handle_image(from_number, image_id):
+    try:
+        print(f"Handling image {image_id} from {from_number}", flush=True)
+        img_bytes = download_image(image_id)
+        if not img_bytes:
+            send_whatsapp(from_number, "Padam pathivirakka mudiyavillai. Meendum muyarchikkavum")
+            return
         if len(img_bytes) > 4 * 1024 * 1024:
             send_whatsapp(from_number, "Photo romba perisu. Chinna photo anupunga.")
             return
-        b64 = base64.b64encode(img_bytes).decode()
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user","content": [
-                {"type": "text", "text": "You are Kan Paarvai, helpful Tamil eye assistant. Explain image in simple, clear Tamil (pure Tamil). Short, kind, 300 words."},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-            ]}]
-        )
-        answer = resp.choices[0].message.content
+
+        # Gemini Vision
+        image = Image.open(BytesIO(img_bytes))
+        prompt = """
+        You are Kan Paarvai, helpful Tamil eye assistant for blind people.
+        Describe this image in simple, clear Tamil (pure Tamil). 
+        Mention objects, danger, location, text in image.
+        If QR code / scam / malware, say 'Echcharikkai! Mosadi!'
+        Keep 3-4 lines, kind tone.
+        """
+        response = gemini_model.generate_content([prompt, image])
+        answer = response.text
+        print(f"Gemini answer: {answer[:200]}")
+
         send_whatsapp(from_number, answer)
         voice_bytes = create_tamil_voice(answer)
         if voice_bytes:
@@ -309,18 +204,16 @@ def handle_image(from_number, image_id):
             send_whatsapp(from_number, "📄 PDF report-um anuppi ullen")
     except Exception as e:
         print(f"Image handle error: {e}")
-        send_whatsapp(from_number, "Mannikkavum, photo padikka mudiyavillai.")
+        send_whatsapp(from_number, "Mannikkavum, photo padikka mudiyavillai. Meendum muyarchikkavum.")
 
 @app.api_route("/", methods=["GET","HEAD"])
 async def home():
-    return {"status": "Kan Paarvai LIVE","tamil_font": os.path.exists(FONT_PATH),"sarvam": bool(SARVAM_API_KEY)}
+    return {"status": "Kan Paarvai LIVE Gemini","tamil_font": os.path.exists(FONT_PATH),"sarvam": bool(SARVAM_API_KEY)}
 
 @app.get("/privacy", response_class=HTMLResponse)
 async def privacy(): return "<html><body><h1>Privacy</h1><p>Photos not stored. Deleted in 24h.</p></body></html>"
-
 @app.get("/terms", response_class=HTMLResponse)
 async def terms(): return "<html><body><h1>Terms</h1><p>Accessibility only.</p></body></html>"
-
 @app.get("/data-deletion", response_class=HTMLResponse)
 async def data_deletion(): return "<html><body><h1>Delete</h1><p>Email kanpaarvai.help@gmail.com to delete.</p></body></html>"
 
@@ -328,39 +221,30 @@ async def data_deletion(): return "<html><body><h1>Delete</h1><p>Email kanpaarva
 async def incoming(request: Request, bg: BackgroundTasks):
     print("=== WEBHOOK POST RECEIVED ===", flush=True)
     body = await request.json()
-    print(body, flush=True)
     try:
         value = body["entry"][0]["changes"][0]["value"]
         if "messages" not in value: return {"ok": True}
         msg = value["messages"][0]
         from_number = msg["from"]
+        
         if msg["type"] == "image":
             bg.add_task(handle_image, from_number, msg["image"]["id"])
         else:
-            bg.add_task(send_whatsapp, from_number, "Vanakkam! 🙏 Photo anupunga, Tamil voice + PDF tharren.")
+            # VI WELCOME - TEXT + VOICE BOTH
+            welcome_text = "Vanakkam! 🙏 Naan Kan Paarvai. Oru photo anupunga, naan Tamil-il voice-il vilakkam tharren. Photo eduthu anupunga."
+            
+            def welcome_with_voice():
+                send_whatsapp(from_number, welcome_text)
+                voice = create_tamil_voice(welcome_text)
+                if voice:
+                    send_whatsapp_audio(from_number, voice)
+            
+            bg.add_task(welcome_with_voice)
+            
     except Exception as e:
         print(f"Webhook error: {e}")
     return {"ok": True}
 
-@app.get("/test-whatsapp")
-async def test_whatsapp(phone: str = "918248926187", msg: str = "Vanakkam! Kan Paarvai test"):
-    """Test without Meta - call from browser"""
-    print(f"=== TEST TRIGGER to {phone}: {msg} ===", flush=True)
-    try:
-        send_whatsapp(phone, msg)
-        voice = create_tamil_voice(msg)
-        if voice:
-            send_whatsapp_audio(phone, voice)
-        return {"status": "sent", "to": phone, "message": msg, "voice": bool(voice)}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.get("/test-image/{image_id}")
-async def test_image(image_id: str, phone: str = "918248926187"):
-    """Test image handling with real image_id"""
-    print(f"=== TEST IMAGE {image_id} to {phone} ===", flush=True)
-    handle_image(phone, image_id)
-    return {"status": "processing", "image_id": image_id, "to": phone}
 @app.get("/webhook")
 async def verify(request: Request):
     params = request.query_params
