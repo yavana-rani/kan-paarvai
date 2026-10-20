@@ -3,4 +3,4 @@ uvicorn[standard]
 requests
 gtts
 fpdf2
-google-generativeai
+google-generativeai>=0.8.0
