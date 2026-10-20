@@ -6,6 +6,59 @@ import requests, base64, os, io
 import openai
 from gtts import gTTS
 from fpdf import FPDF
+import base64
+import requests
+
+def is_unsafe_image(image_bytes: bytes) -> tuple[bool, str]:
+    """
+    Check if image is malware / inappropriate / not useful
+    Returns: (is_unsafe, reason_tamil)
+    """
+    try:
+        # 1. Basic file check - too small or not image
+        if len(image_bytes) < 1024:
+            return True, "Padam alavu migach siriyathu. Thelivana padam edukkavum"
+
+        # 2. Use OpenAI Vision to classify
+        b64 = base64.b64encode(image_bytes).decode()
+        resp = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": 
+                     "Classify this image for a blind assistance app. "
+                     "Is it unsafe? Check: porn/nudity, gore, weapon, QR code promising free money/hack, "
+                     "malware screenshot, abuse, or completely black/blurry with no info. "
+                     "Reply ONLY JSON: {\"unsafe\": true/false, \"reason_en\": \"short reason\"} "
+                     "If unsafe = true for NSFW/malware/scams. If just blurry/dark, unsafe=false but reason_en='blurry'"},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+                ]
+            }],
+            max_tokens=100
+        )
+        import json
+        result = json.loads(resp.choices[0].message.content)
+        
+        if result.get("unsafe"):
+            # Map to Tamil alert
+            reason = result.get("reason_en","unsafe")
+            if "porn" in reason.lower() or "nude" in reason.lower():
+                tamil = "Ethu thagatha padam. Ithu thavirka pattathu"
+            elif "malware" in reason.lower() or "qr" in reason.lower() or "scam" in reason.lower():
+                tamil = "Echcharikkai! Ithu mosadi padam pola therigirathu. Click pannatheenga. Padathil mosamana thagaval irukkalam"
+            else:
+                tamil = f"Echcharikkai! Ithu pathukappatra padam alla: {reason}"
+            return True, tamil
+        
+        # 3. If blurry/dark - not unsafe but warn
+        if "blurry" in result.get("reason_en","").lower():
+            return False, "blurry"  # special handle
+            
+        return False, ""
+    except Exception as e:
+        print(f"Safety check failed: {e}", flush=True)
+        return False, ""  # fail open - don't block if check fails
 
 # --- Create folders first ---
 os.makedirs("static", exist_ok=True)
