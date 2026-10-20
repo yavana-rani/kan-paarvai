@@ -4,7 +4,8 @@ from fastapi.staticfiles import StaticFiles
 import requests, base64, os, io
 from gtts import gTTS
 from fpdf import FPDF
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from PIL import Image
 from io import BytesIO
 
@@ -22,8 +23,8 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123").strip()
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
 
 # Gemini config
-genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "")
-gemini_model = genai.GenerativeModel("gemini-2.5-flash")
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_MODEL_NAME = "gemini-3.8-flash"
 
 # --- Tamil Font ---
 FONT_PATH = "/tmp/NotoSansTamil-Regular.ttf"
@@ -189,8 +190,11 @@ def handle_image(from_number, image_id):
         If QR code / scam / malware, say 'Echcharikkai! Mosadi!'
         Keep 3-4 lines, kind tone.
         """
-        response = gemini_model.generate_content([prompt, image])
-        answer = response.text
+        response = gemini_client.models.generate_content(
+    model=GEMINI_MODEL_NAME,
+    contents=[tamil_prompt, image]
+)
+answer = response.text
         print(f"Gemini answer: {answer[:200]}")
 
         send_whatsapp(from_number, answer)
