@@ -3,4 +3,5 @@ uvicorn[standard]
 requests
 gtts
 fpdf2
+pillow
 google-genai
