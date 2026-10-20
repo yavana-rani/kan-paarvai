@@ -23,7 +23,7 @@ SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "").strip()
 
 # Gemini config
 genai.configure(api_key=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "")
-gemini_model = genai.GenerativeModel("gemini-2.0-flash")
+gemini_model = genai.GenerativeModel("gemini-2.5-flash")
 
 # --- Tamil Font ---
 FONT_PATH = "/tmp/NotoSansTamil-Regular.ttf"
