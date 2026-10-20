@@ -9,6 +9,30 @@ from fpdf import FPDF
 import base64
 import requests
 
+def handle_image(phone: str, image_id: str):
+    print(f"Handling image {image_id}", flush=True)
+    image_bytes = download_image(image_id)
+    if not image_bytes:
+        send_whatsapp(phone, "Padam pathivirakka mudiyavillai. Meendum muyarchikkavum")
+        return
+
+    # === SAFETY CHECK ===
+    unsafe, tamil_alert = is_unsafe_image(image_bytes)
+    if unsafe:
+        print(f"Blocked unsafe image: {tamil_alert}", flush=True)
+        send_whatsapp(phone, f"⚠️ {tamil_alert}")
+        voice = create_tamil_voice(tamil_alert)
+        if voice:
+            send_whatsapp_audio(phone, voice)
+        return  # STOP - don't process further
+    
+    if tamil_alert == "blurry":
+        msg = "Padam migavum iruttaga ullathu. Vilakku potu, thelivaga oru padam edukkavum"
+        send_whatsapp(phone, msg)
+        voice = create_tamil_voice(msg)
+        if voice:
+            send_whatsapp_audio(phone, voice)
+        # continue anyway or return - your choice
 def is_unsafe_image(image_bytes: bytes) -> tuple[bool, str]:
     """
     Check if image is malware / inappropriate / not useful
