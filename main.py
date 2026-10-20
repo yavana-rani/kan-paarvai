@@ -9,6 +9,7 @@ from fpdf import FPDF
 import base64
 import requests
 
+   headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
 def handle_image(phone: str, image_id: str):
     print(f"Handling image {image_id}", flush=True)
     image_bytes = download_image(image_id)
