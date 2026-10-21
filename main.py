@@ -26,6 +26,37 @@ if GEMINI_API_KEY:
 
 GEMINI_MODEL_NAME = "gemini-3.8-flash"
 
+def send_voice_ack(to: str, text="Photo kidaichiduchu pa, paarkuren"):
+    # 1. Tamil voice create pannu (OpenAI TTS)
+    speech = client.audio.speech.create(
+        model="tts-1",
+        voice="nova",  # soft female voice - Amma maathiri
+        input=text
+    )
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        f.write(speech.content)
+        audio_path = f.name
+    
+    # 2. WhatsApp ku upload pannanum
+    # WhatsApp needs media upload first
+    url = f"https://graph.facebook.com/v20.0/{PHONE_ID}/media"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    with open(audio_path, "rb") as file:
+        files = {"file": file}
+        data = {"messaging_product": "whatsapp", "type": "audio/mpeg"}
+        res = requests.post(url, headers=headers, files=files, data=data).json()
+        media_id = res.get('id')
+    
+    # 3. Voice anuppu
+    send_url = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "audio",
+        "audio": {"id": media_id}
+    }
+    requests.post(send_url, headers=headers, json=payload)
+
 def send_whatsapp(to, text):
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
         return
@@ -127,6 +158,15 @@ async def root():
 @app.get("/webhook")
 async def verify(request: Request):
     params = dict(request.query_params)
+    if msg.get('image'):
+    # ITHU THAAN VOICE ENGAGE (0 sec)
+    send_voice_ack(sender, "Photo kidaichiduchu pa, Kan Paarvai paarkuthu, rendu nimisham")
+    # Text-um venumna?
+    # send_whatsapp(sender, "Photo kidaichiduchu pa! ...")
+    
+    # Piraku analysis...
+    result = analyze_image(image_url)
+    send_whatsapp(sender, result)
     if params.get("hub.verify_token") == VERIFY_TOKEN:
         return int(params.get("hub.challenge", 0))
     return {"error": "invalid token"}
