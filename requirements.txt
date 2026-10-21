@@ -5,4 +5,5 @@ gtts
 fpdf2
 pillow
 google-genai
-python.dotenv
+PyMuPDF
+
