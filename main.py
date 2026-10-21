@@ -4,12 +4,10 @@ import requests
 import tempfile
 from PIL import Image
 from gtts import gTTS
-from fpdf import FPDF
 from io import BytesIO
 
-# NEW GOOGLE LIBRARY
+# NEW GOOGLE LIBRARY - 3.8 model
 from google import genai
-from google.genai import types
 
 app = FastAPI()
 
@@ -17,45 +15,13 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
 
-# Gemini 3.8 Flash - New model for new users
+# Gemini 3.8 Flash - New model
 gemini_client = None
 if GEMINI_API_KEY:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
-GEMINI_MODEL_NAME = "gemini-3.8-flash"
-
-def send_voice_ack(to: str, text="Photo kidaichiduchu pa, paarkuren"):
-    # 1. Tamil voice create pannu (OpenAI TTS)
-    speech = client.audio.speech.create(
-        model="tts-1",
-        voice="nova",  # soft female voice - Amma maathiri
-        input=text
-    )
-    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
-        f.write(speech.content)
-        audio_path = f.name
-    
-    # 2. WhatsApp ku upload pannanum
-    # WhatsApp needs media upload first
-    url = f"https://graph.facebook.com/v20.0/{PHONE_ID}/media"
-    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    with open(audio_path, "rb") as file:
-        files = {"file": file}
-        data = {"messaging_product": "whatsapp", "type": "audio/mpeg"}
-        res = requests.post(url, headers=headers, files=files, data=data).json()
-        media_id = res.get('id')
-    
-    # 3. Voice anuppu
-    send_url = f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "to": to,
-        "type": "audio",
-        "audio": {"id": media_id}
-    }
-    requests.post(send_url, headers=headers, json=payload)
+GEMINI_MODEL_NAME = "gemini-3.8-flash"  # <--- Neenga ketta maathiri same
 
 def send_whatsapp(to, text):
     if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
@@ -105,29 +71,31 @@ def create_tamil_voice(text):
 
 def handle_image(from_number, image_id):
     try:
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         # 1. Download image from WhatsApp
         media_url = f"https://graph.facebook.com/v20.0/{image_id}"
-        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         r = requests.get(media_url, headers=headers, timeout=15)
         media_info = r.json()
         image_url = media_info.get("url")
         if not image_url:
-            print(f"No image url: {media_info}")
             send_whatsapp(from_number, "Mannikkavum, photo download mudiyavillai.")
             return
         
         img_data = requests.get(image_url, headers=headers, timeout=20).content
         image = Image.open(BytesIO(img_data))
-        
-        # 2. Gemini 3.8 Flash
-        tamil_prompt = """Intha photo-vai paarvi illathavarkalukku Tamil-il thelivaga vilakku. 
+
+        # 2. ENGAGE - 0 sec la reply
+        send_whatsapp(from_number, "Photo kidaichiduchu pa, Kan Paarvai paarkuthu... rendu nimisham 😊")
+
+        # 3. Gemini 3.8 Flash analysis
+        tamil_prompt = """Intha photo-vai paarvai illathavarkalukku Tamil-il thelivaga vilakku. 
         1. Photo-vil enna irukku? 
-        2. Text irundhal athai Tamil-il padithu sollu.
+        2. Text irundhal athai Tamil-il padithu sollu. Numbers irundha row-wise sollu.
         3. Colors, objects, people ellam sollu.
-        Simple Tamil, warm-a sollu. English vendaam."""
+        Simple warm Tamil, English vendaam."""
 
         if not gemini_client:
-            send_whatsapp(from_number, "Gemini key set pannavillai. Render-il GEMINI_API_KEY add pannunga.")
+            send_whatsapp(from_number, "GEMINI_API_KEY set pannavillai Render-il.")
             return
 
         response = gemini_client.models.generate_content(
@@ -135,21 +103,18 @@ def handle_image(from_number, image_id):
             contents=[tamil_prompt, image]
         )
         answer = response.text
-        print(f"Gemini answer: {answer[:200]}")
 
-        # 3. Send Text + Voice (VI need voice!)
+        # 4. Send Text + Voice
         send_whatsapp(from_number, answer)
         voice_path = create_tamil_voice(answer)
         if voice_path:
             send_whatsapp_audio(from_number, voice_path)
-            try:
-                os.remove(voice_path)
-            except:
-                pass
+            try: os.remove(voice_path)
+            except: pass
 
     except Exception as e:
         print(f"Image handle error: {e}")
-        send_whatsapp(from_number, "Mannikkavum, photo padikka mudiyavillai. Meendum muyarchi seiyavum.")
+        send_whatsapp(from_number, "Mannikkavum, photo padikka mudiyavillai. Meendum anupunga.")
 
 @app.get("/")
 async def root():
@@ -158,17 +123,9 @@ async def root():
 @app.get("/webhook")
 async def verify(request: Request):
     params = dict(request.query_params)
-    if msg.get('image'):
-    # ITHU THAAN VOICE ENGAGE (0 sec)
-    send_voice_ack(sender, "Photo kidaichiduchu pa, Kan Paarvai paarkuthu, rendu nimisham")
-    # Text-um venumna?
-    # send_whatsapp(sender, "Photo kidaichiduchu pa! ...")
-    
-    # Piraku analysis...
-    result = analyze_image(image_url)
-    send_whatsapp(sender, result)
     if params.get("hub.verify_token") == VERIFY_TOKEN:
-        return int(params.get("hub.challenge", 0))
+        challenge = params.get("hub.challenge", "0")
+        return int(challenge)
     return {"error": "invalid token"}
 
 @app.post("/webhook")
@@ -190,10 +147,8 @@ async def incoming(request: Request, bg: BackgroundTasks):
                 vp = create_tamil_voice(welcome_text)
                 if vp:
                     send_whatsapp_audio(from_number, vp)
-                    try:
-                        os.remove(vp)
-                    except:
-                        pass
+                    try: os.remove(vp)
+                    except: pass
             bg.add_task(welcome_with_voice)
     except Exception as e:
         print(f"Webhook error: {e}")
