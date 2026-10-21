@@ -1,48 +1,41 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 import google.generativeai as genai
 import os
-from PIL import Image
-import io
 
-app = FastAPI(title="Kan Paarvai")
+app = FastAPI()
 
-# 1. Gemini Setup
+# Setup
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# 2. Tamil + Maths Prompt - Short & Crisp
-KAN_PROMPT = """
-Nee Kan Paarvai, paarvaiyatra nanbarukku uthavum nanban.
-Vithi:
-1. Bathil eppothum Tamil la mattum, 2-4 varila short-a crisp-a sollu.
-2. Maths formula iruntha pesara maathiri sollu: 
-   x² = x square, √ = veru, / = by, = = equal to, + = plus
-3. Normal photo na: yaar, enna dress, enna panrar mattum sollu.
-4. English, periya vilakkam vendaam.
-"""
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "kanpaarvai123")
+
+KAN_PROMPT = "Nee Kan Paarvai. Tamil la 2-4 varila short-a sollu. Maths iruntha x square, veru nu pesara maathiri sollu."
 
 @app.get("/")
 def home():
-    return {"message": "Kan Paarvai Live pa! 200 OK"}
+    return {"status": "Live pa"}
 
-@app.post("/describe")
-async def describe_image(file: UploadFile = File(...)):
-    try:
-        image_data = await file.read()
-        image = Image.open(io.BytesIO(image_data))
-        
-        response = model.generate_content([KAN_PROMPT, image])
-        tamil_text = response.text
-        
-        # Short-a cut pannu
-        if len(tamil_text) > 400:
-            tamil_text = tamil_text[:400]
-            
-        return {"tamil_reply": tamil_text}
-    except Exception as e:
-        return {"error": str(e), "tamil_reply": "Photo puriyala pa, vera photo anupunga"}
+# 1. Meta Verification ku - GET /webhook
+@app.get("/webhook")
+def verify_webhook(request: Request):
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge")
+    if mode == "subscribe" and token == VERIFY_TOKEN:
+        return PlainTextResponse(content=challenge, status_code=200)
+    return PlainTextResponse("Failed", status_code=403)
 
-# Local test ku
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+# 2. Message varum pothu - POST /webhook - ITHU THAAN MUKKIYAM
+@app.post("/webhook")
+async def receive_message(request: Request):
+    data = await request.json()
+    print(f"Message vanthuchu: {data}")
+    # inga unga WhatsApp reply logic varum
+    return {"status": "ok"}
+
+# 405 error poganum na - HEAD ku
+@app.head("/")
+def head_check():
+    return {"ok": True}
