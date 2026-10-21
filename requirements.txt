@@ -5,6 +5,6 @@ gtts
 fpdf2
 pillow
 python-multipart
-google-generativeai
+google-genai
 PyMuPDF
 
