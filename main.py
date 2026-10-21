@@ -6,6 +6,38 @@ from io import BytesIO
 import fitz
 from fpdf import FPDF  # <--- CREATE KU
 from google import genai
+import google.generativeai as genai
+import os, time
+
+# API Key set pannu
+genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
+
+# MODEL DEFINE PANNU - ITHU THAAN MUKKIYAM PA!
+MODEL_NAME = "gemini-1.5-flash"
+model = genai.GenerativeModel(MODEL_NAME)
+
+# Tamil Prompt
+KAN_PAARVAI_PROMPT = """
+Nee Kan Paarvai. Tamil la mattum 2-4 varila short-a crisp-a sollu.
+Maths formula iruntha: x² -> x square, √ -> veru nu pesara maathiri sollu.
+"""
+
+def ask_gemini_with_retry(prompt_text, image=None):
+    for i in range(3):
+        try:
+            if image:
+                resp = model.generate_content([prompt_text, image])
+            else:
+                resp = model.generate_content(prompt_text)
+            return resp.text[:300]  # short crisp
+        except Exception as e:
+            print(f"Retry {i+1}: {e}")
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                time.sleep(2)
+                continue
+            if i == 2:
+                return "Model busy pa, konja neram kalichu try pannunga"
+    return "Busy pa"
 KAN_PAARVAI_PROMPT = """
 Nee Kan Paarvai, paarvaiyatra nanban. Nee ippo oru photo-va paakara.
 
