@@ -106,7 +106,7 @@ def handle_image(from_number, image_id):
         img_data = requests.get(image_url, headers=headers, timeout=20).content
         image = Image.open(BytesIO(img_data))
         send_engage_voice(from_number, "Photo kidaichiduchu pa, paarkuren")
-        response = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Tamil-il vilakku", image])
+        
         response = model.generate_content([KAN_PAARVAI_PROMPT, image])
         answer = response.text
         send_whatsapp(from_number, answer)
@@ -140,7 +140,7 @@ def handle_voice(from_number, audio_id):
         open(path, "wb").write(audio_data)
         send_engage_voice(from_number, "Voice kidaichiduchu process panren konjam wait pannunga ")
         myfile = gemini_client.files.upload(file=path)
-        response = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Intha voice-a purinthu enna ketkiranga sollunga", myfile])
+        response = model.generate_content([KAN_PAARVAI_PROMPT, image])
         answer = response.text
         os.remove(path)
         send_whatsapp(from_number, answer)
