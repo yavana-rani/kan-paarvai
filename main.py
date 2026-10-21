@@ -1,41 +1,65 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 import google.generativeai as genai
-import os
+import requests, os
+from PIL import Image
+import io
 
 app = FastAPI()
 
-# Setup
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model = genai.GenerativeModel("gemini-1.5-flash")
 
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "kanpaarvai123")
+WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
+PHONE_ID = os.environ.get("PHONE_NUMBER_ID") # 1464188770101945
 
 KAN_PROMPT = "Nee Kan Paarvai. Tamil la 2-4 varila short-a sollu. Maths iruntha x square, veru nu pesara maathiri sollu."
 
 @app.get("/")
-def home():
-    return {"status": "Live pa"}
+def home(): return {"status":"Live"}
 
-# 1. Meta Verification ku - GET /webhook
 @app.get("/webhook")
-def verify_webhook(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return PlainTextResponse(content=challenge, status_code=200)
-    return PlainTextResponse("Failed", status_code=403)
+def verify(request: Request):
+    if request.query_params.get("hub.verify_token") == VERIFY_TOKEN:
+        return PlainTextResponse(request.query_params.get("hub.challenge"))
+    return PlainTextResponse("fail", 403)
 
-# 2. Message varum pothu - POST /webhook - ITHU THAAN MUKKIYAM
 @app.post("/webhook")
-async def receive_message(request: Request):
+async def receive(request: Request):
     data = await request.json()
-    print(f"Message vanthuchu: {data}")
-    # inga unga WhatsApp reply logic varum
-    return {"status": "ok"}
+    try:
+        entry = data['entry'][0]['changes'][0]['value']
+        if 'messages' not in entry: return {"ok": True}
+        
+        msg = entry['messages'][0]
+        from_number = msg['from']
+        
+        if msg['type'] == 'image':
+            # 1. Image URL edukka
+            media_id = msg['image']['id']
+            media_url_res = requests.get(
+                f"https://graph.facebook.com/v20.0/{media_id}",
+                headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+            ).json()
+            media_url = media_url_res['url']
+            
+            # 2. Download
+            img_bytes = requests.get(media_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
+            image = Image.open(io.BytesIO(img_bytes))
+            
+            # 3. Gemini ku anuppa
+            res = model.generate_content([KAN_PROMPT, image])
+            tamil_reply = res.text[:500]
+        else:
+            tamil_reply = "Photo anupunga pa, naan Tamil la solluren!"
 
-# 405 error poganum na - HEAD ku
-@app.head("/")
-def head_check():
+        # 4. Thumba WhatsApp la reply
+        requests.post(
+            f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages",
+            headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
+            json={"messaging_product": "whatsapp", "to": from_number, "text": {"body": tamil_reply}}
+        )
+    except Exception as e:
+        print(f"Error: {e}")
     return {"ok": True}
