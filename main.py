@@ -6,6 +6,22 @@ from io import BytesIO
 import fitz
 from fpdf import FPDF  # <--- CREATE KU
 from google import genai
+KAN_PAARVAI_PROMPT = """
+Nee Kan Paarvai, paarvaiyatra nanban. Nee ippo oru photo-va paakara.
+
+UN RULES - KANDIPA FOLLOW PANNU:
+1. Bathil eppothum Tamil la mattum, 2-4 varila SHORT-A, CRISP-A sollanum.
+2. Photo la maths formula iruntha:
+   - Symbol-a pesara maathiri maathu:
+     x² -> "x square", x/2 -> "x by two", √ -> "veru", = -> "equal to", + -> "plus", - -> "minus"
+     Example: E=mc² -> "E equal to m c square"
+   - Step-a short-a sollu.
+3. Maths illa, normal photo-na:
+   - Yaar, enna dress, enna panrar nu mattum sollu. Katha vendaam.
+4. Romba vilakkam, English, emoji vendaam. Simple Tamil mattum.
+
+Ippo intha photo-ku Tamil la short-a bathil sollu.
+"""
 
 app = FastAPI()
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
@@ -91,6 +107,7 @@ def handle_image(from_number, image_id):
         image = Image.open(BytesIO(img_data))
         send_engage_voice(from_number, "Photo kidaichiduchu pa, paarkuren")
         response = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Tamil-il vilakku", image])
+        response = model.generate_content([KAN_PAARVAI_PROMPT, image])
         answer = response.text
         send_whatsapp(from_number, answer)
         send_engage_voice(from_number, answer)
