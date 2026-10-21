@@ -1,42 +1,29 @@
 from fastapi import FastAPI, Request, BackgroundTasks
-import os
-import requests
-import tempfile
+import os, requests, tempfile
 from PIL import Image
 from gtts import gTTS
 from io import BytesIO
-
-# NEW GOOGLE LIBRARY - 3.8 model
+import fitz
+from fpdf import FPDF  # <--- CREATE KU
 from google import genai
 
 app = FastAPI()
-
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Gemini 3.8 Flash - New model
-gemini_client = None
-if GEMINI_API_KEY:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-
-GEMINI_MODEL_NAME = "gemini-3.8-flash"  # <--- Neenga ketta maathiri same
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+GEMINI_MODEL_NAME = "gemini-3.8-flash"
 
 def send_whatsapp(to, text):
-    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
-        return
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text[:4000]}}
-    try:
-        requests.post(url, headers=headers, json=payload, timeout=15)
-    except Exception as e:
-        print(f"Send text error: {e}")
+    try: requests.post(url, headers=headers, json=payload, timeout=15)
+    except: pass
 
 def send_whatsapp_audio(to, audio_path):
-    if not WHATSAPP_TOKEN or not PHONE_NUMBER_ID:
-        return None
     try:
         url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/media"
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
@@ -45,17 +32,26 @@ def send_whatsapp_audio(to, audio_path):
             data = {'type': 'audio/mpeg', 'messaging_product': 'whatsapp'}
             r = requests.post(url, headers=headers, files=files, data=data, timeout=30)
             media_id = r.json().get('id')
-        if not media_id:
-            print(f"Audio upload failed: {r.text}")
-            return None
         url2 = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
         headers2 = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
         payload = {"messaging_product": "whatsapp", "to": to, "type": "audio", "audio": {"id": media_id}}
         requests.post(url2, headers=headers2, json=payload, timeout=15)
-        return True
-    except Exception as e:
-        print(f"Send audio error: {e}")
-        return None
+    except Exception as e: print(f"Audio send error: {e}")
+
+def send_whatsapp_document(to, doc_path, filename="KanPaarvai_Letter.pdf"):
+    try:
+        url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/media"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        with open(doc_path, 'rb') as f:
+            files = {'file': (filename, f, 'application/pdf')}
+            data = {'type': 'document', 'messaging_product': 'whatsapp'}
+            r = requests.post(url, headers=headers, files=files, data=data, timeout=30)
+            media_id = r.json().get('id')
+        url2 = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
+        headers2 = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
+        payload = {"messaging_product": "whatsapp", "to": to, "type": "document", "document": {"id": media_id, "filename": filename}}
+        requests.post(url2, headers=headers2, json=payload, timeout=15)
+    except Exception as e: print(f"Doc send error: {e}")
 
 def create_tamil_voice(text):
     try:
@@ -65,91 +61,128 @@ def create_tamil_voice(text):
         os.close(fd)
         tts.save(path)
         return path
-    except Exception as e:
-        print(f"gTTS error: {e}")
-        return None
+    except: return None
 
+def send_engage_voice(to, text):
+    vp = create_tamil_voice(text)
+    if vp:
+        send_whatsapp_audio(to, vp)
+        try: os.remove(vp)
+        except: pass
+
+def create_letter_pdf(content_text):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.add_font("Noto", "", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", uni=True) # Tamil support try
+    pdf.set_font("Arial", size=12)
+    # Tamil font illa-na English la varum, aana content Tamil la irukkum
+    pdf.multi_cell(0, 10, content_text)
+    fd, path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    pdf.output(path)
+    return path
+
+# ... (handle_image, handle_pdf, handle_voice same as before) ...
 def handle_image(from_number, image_id):
     try:
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-        # 1. Download image from WhatsApp
-        media_url = f"https://graph.facebook.com/v20.0/{image_id}"
-        r = requests.get(media_url, headers=headers, timeout=15)
-        media_info = r.json()
-        image_url = media_info.get("url")
-        if not image_url:
-            send_whatsapp(from_number, "Mannikkavum, photo download mudiyavillai.")
-            return
-        
+        image_url = requests.get(f"https://graph.facebook.com/v20.0/{image_id}", headers=headers, timeout=15).json().get("url")
         img_data = requests.get(image_url, headers=headers, timeout=20).content
         image = Image.open(BytesIO(img_data))
-
-        # 2. ENGAGE - 0 sec la reply
-        send_whatsapp(from_number, "Photo kidaichiduchu pa, Kan Paarvai paarkuthu... rendu nimisham 😊")
-
-        # 3. Gemini 3.8 Flash analysis
-        tamil_prompt = """Intha photo-vai paarvai illathavarkalukku Tamil-il thelivaga vilakku. 
-        1. Photo-vil enna irukku? 
-        2. Text irundhal athai Tamil-il padithu sollu. Numbers irundha row-wise sollu.
-        3. Colors, objects, people ellam sollu.
-        Simple warm Tamil, English vendaam."""
-
-        if not gemini_client:
-            send_whatsapp(from_number, "GEMINI_API_KEY set pannavillai Render-il.")
-            return
-
-        response = gemini_client.models.generate_content(
-            model=GEMINI_MODEL_NAME,
-            contents=[tamil_prompt, image]
-        )
+        send_engage_voice(from_number, "Photo kidaichiduchu pa, paarkuren")
+        response = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Tamil-il vilakku", image])
         answer = response.text
-
-        # 4. Send Text + Voice
         send_whatsapp(from_number, answer)
-        voice_path = create_tamil_voice(answer)
-        if voice_path:
-            send_whatsapp_audio(from_number, voice_path)
-            try: os.remove(voice_path)
-            except: pass
+        send_engage_voice(from_number, answer)
+    except Exception as e: print(e)
 
-    except Exception as e:
-        print(f"Image handle error: {e}")
-        send_whatsapp(from_number, "Mannikkavum, photo padikka mudiyavillai. Meendum anupunga.")
+def handle_pdf(from_number, doc_id):
+    try:
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        doc_url = requests.get(f"https://graph.facebook.com/v20.0/{doc_id}", headers=headers, timeout=15).json().get("url")
+        send_engage_voice(from_number, "PDF kidaichiduchu pa")
+        pdf_data = requests.get(doc_url, headers=headers, timeout=30).content
+        doc = fitz.open(stream=pdf_data, filetype="pdf")
+        full = ""
+        for i in range(min(3, len(doc))):
+            pix = doc[i].get_pixmap(dpi=200)
+            image = Image.open(BytesIO(pix.tobytes("png")))
+            resp = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Tamil-il vilakku", image])
+            full += resp.text + "\n"
+        send_whatsapp(from_number, full[:4000])
+        send_engage_voice(from_number, full)
+    except Exception as e: print(e)
+
+def handle_voice(from_number, audio_id):
+    try:
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        audio_url = requests.get(f"https://graph.facebook.com/v20.0/{audio_id}", headers=headers, timeout=15).json().get("url")
+        audio_data = requests.get(audio_url, headers=headers, timeout=20).content
+        fd, path = tempfile.mkstemp(suffix=".ogg")
+        os.close(fd)
+        open(path, "wb").write(audio_data)
+        send_engage_voice(from_number, "Voice kidaichiduchu pa")
+        myfile = gemini_client.files.upload(file=path)
+        response = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Intha voice-a purinthu enna ketkiranga sollu", myfile])
+        answer = response.text
+        os.remove(path)
+        send_whatsapp(from_number, answer)
+        send_engage_voice(from_number, answer)
+    except Exception as e: print(e)
+
+def handle_text_create(from_number, text):
+    # Letter create pannuma nu check
+    keywords = ["letter", "create", "document", "petition", "manu", "application"]
+    if any(k in text.lower() for k in keywords):
+        send_engage_voice(from_number, "Letter create pannuren pa, oru nimisham")
+        try:
+            # Gemini kita letter content vaangu
+            prompt = f"User ketta letter: {text}. Itha formal Tamil/English letter-a create pannu. Date, To, Subject, Body ellam vachu. Simple."
+            resp = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=[prompt])
+            letter_content = resp.text
+            
+            pdf_path = create_letter_pdf(letter_content)
+            send_whatsapp(from_number, f"Letter ready pa! \n\n{letter_content[:2000]}")
+            send_whatsapp_document(from_number, pdf_path, "KanPaarvai_Letter.pdf")
+            send_engage_voice(from_number, "Letter PDF ready pa, anupiten")
+            os.remove(pdf_path)
+            return True
+        except Exception as e:
+            print(f"Create PDF error: {e}")
+    return False
 
 @app.get("/")
-async def root():
-    return {"status": "Kan Paarvai LIVE Gemini 3.8 Flash"}
+async def root(): return {"status": "Kan Paarvai LIVE - Read + Create PDF - 3.8 Flash"}
 
 @app.get("/webhook")
 async def verify(request: Request):
     params = dict(request.query_params)
     if params.get("hub.verify_token") == VERIFY_TOKEN:
-        challenge = params.get("hub.challenge", "0")
-        return int(challenge)
-    return {"error": "invalid token"}
+        return int(params.get("hub.challenge", "0"))
+    return {"error": "invalid"}
 
 @app.post("/webhook")
 async def incoming(request: Request, bg: BackgroundTasks):
-    print("=== WEBHOOK POST RECEIVED ===", flush=True)
     body = await request.json()
     try:
         value = body["entry"][0]["changes"][0]["value"]
-        if "messages" not in value:
-            return {"ok": True}
+        if "messages" not in value: return {"ok": True}
         msg = value["messages"][0]
         from_number = msg["from"]
         if msg["type"] == "image":
             bg.add_task(handle_image, from_number, msg["image"]["id"])
-        else:
-            welcome_text = "Vanakkam! Naan Kan Paarvai. Photo anupunga, Tamil-il voice-il vilakkam tharren."
-            def welcome_with_voice():
-                send_whatsapp(from_number, welcome_text)
-                vp = create_tamil_voice(welcome_text)
-                if vp:
-                    send_whatsapp_audio(from_number, vp)
-                    try: os.remove(vp)
-                    except: pass
-            bg.add_task(welcome_with_voice)
-    except Exception as e:
-        print(f"Webhook error: {e}")
+        elif msg["type"] == "document":
+            bg.add_task(handle_pdf, from_number, msg["document"]["id"])
+        elif msg["type"] == "audio":
+            bg.add_task(handle_voice, from_number, msg["audio"]["id"])
+        elif msg["type"] == "text":
+            txt = msg["text"]["body"]
+            # Create check
+            if not handle_text_create(from_number, txt):
+                def welcome():
+                    t = "Vanakkam! Photo, PDF anupunga padippen. Letter venumna 'collector ku letter venum' nu sollunga, naan PDF create panni tharen!"
+                    send_whatsapp(from_number, t)
+                    send_engage_voice(from_number, t)
+                bg.add_task(welcome)
+    except Exception as e: print(e)
     return {"ok": True}
