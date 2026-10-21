@@ -1,8 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
 import requests, os, base64
-from PIL import Image
-import io
 
 app = FastAPI()
 
@@ -22,6 +20,9 @@ def verify(request: Request):
         return PlainTextResponse(request.query_params.get("hub.challenge"))
     return PlainTextResponse("fail", 403)
 
+@app.head("/")
+def head(): return {"ok": True}
+
 @app.post("/webhook")
 async def receive(request: Request):
     data = await request.json()
@@ -36,22 +37,19 @@ async def receive(request: Request):
             media_id = msg['image']['id']
             m_url = requests.get(f"https://graph.facebook.com/v20.0/{media_id}", headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).json()['url']
             img_bytes = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
-            
-            # Base64 pannu
             b64_img = base64.b64encode(img_bytes).decode('utf-8')
             
-            # DIRECT GOOGLE API - v1, v1beta illa!
             gemini_url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {"text": KAN_PROMPT},
-                        {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}
-                    ]
-                }]
-            }
+            payload = {"contents": [{"parts": [{"text": KAN_PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}]}
+            
             g_res = requests.post(gemini_url, json=payload).json()
-            tamil_reply = g_res['candidates'][0]['content']['parts'][0]['text'][:500]
+            print(f"GEMINI FULL RESPONSE: {g_res}") # Ithu log la varum pa
+            
+            if 'candidates' in g_res:
+                tamil_reply = g_res['candidates'][0]['content']['parts'][0]['text'][:500]
+            else:
+                print(f"Gemini Error: {g_res}")
+                tamil_reply = "Gemini la konjam prachanai pa, 2 sec la thirumba anupunga!"
 
         requests.post(f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages",
             headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
@@ -60,7 +58,3 @@ async def receive(request: Request):
     except Exception as e:
         print(f"Error: {e}")
     return {"ok": True}
-
-# 405 poganum
-@app.head("/")
-def head(): return {"ok": True}
