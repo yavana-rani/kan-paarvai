@@ -14,7 +14,7 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-GEMINI_MODEL_NAME = "gemini-3.8-flash"
+GEMINI_MODEL_NAME = "gemini-2.0-flash"
 
 def send_whatsapp(to, text):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
