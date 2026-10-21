@@ -4,7 +4,7 @@ requests
 gtts
 fpdf2
 pillow
-python multipart
+python-multipart
 google-generativeai
 PyMuPDF
 
