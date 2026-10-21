@@ -14,7 +14,7 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "kanpaarvai123")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-GEMINI_MODEL_NAME = "gemini-2.0-flash"
+GEMINI_MODEL_NAME = "gemini-3.8-flash"
 
 def send_whatsapp(to, text):
     url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
@@ -40,14 +40,14 @@ def send_whatsapp_audio(to, audio_path):
 
 def send_whatsapp_document(to, doc_path, filename="KanPaarvai_Letter.pdf"):
     try:
-        url = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/media"
+        url = f"https://graph.facebook.com/v26.0/{PHONE_NUMBER_ID}/media"
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         with open(doc_path, 'rb') as f:
             files = {'file': (filename, f, 'application/pdf')}
             data = {'type': 'document', 'messaging_product': 'whatsapp'}
             r = requests.post(url, headers=headers, files=files, data=data, timeout=30)
             media_id = r.json().get('id')
-        url2 = f"https://graph.facebook.com/v20.0/{PHONE_NUMBER_ID}/messages"
+        url2 = f"https://graph.facebook.com/v26.0/{PHONE_NUMBER_ID}/messages"
         headers2 = {"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"}
         payload = {"messaging_product": "whatsapp", "to": to, "type": "document", "document": {"id": media_id, "filename": filename}}
         requests.post(url2, headers=headers2, json=payload, timeout=15)
@@ -86,7 +86,7 @@ def create_letter_pdf(content_text):
 def handle_image(from_number, image_id):
     try:
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-        image_url = requests.get(f"https://graph.facebook.com/v20.0/{image_id}", headers=headers, timeout=15).json().get("url")
+        image_url = requests.get(f"https://graph.facebook.com/v26.0/{image_id}", headers=headers, timeout=15).json().get("url")
         img_data = requests.get(image_url, headers=headers, timeout=20).content
         image = Image.open(BytesIO(img_data))
         send_engage_voice(from_number, "Photo kidaichiduchu pa, paarkuren")
@@ -99,15 +99,15 @@ def handle_image(from_number, image_id):
 def handle_pdf(from_number, doc_id):
     try:
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-        doc_url = requests.get(f"https://graph.facebook.com/v20.0/{doc_id}", headers=headers, timeout=15).json().get("url")
-        send_engage_voice(from_number, "PDF kidaichiduchu pa")
+        doc_url = requests.get(f"https://graph.facebook.com/v26.0/{doc_id}", headers=headers, timeout=15).json().get("url")
+        send_engage_voice(from_number, "PDF kidaichiduchu konjam wait pannunga process panren")
         pdf_data = requests.get(doc_url, headers=headers, timeout=30).content
         doc = fitz.open(stream=pdf_data, filetype="pdf")
         full = ""
         for i in range(min(3, len(doc))):
             pix = doc[i].get_pixmap(dpi=200)
             image = Image.open(BytesIO(pix.tobytes("png")))
-            resp = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Tamil-il vilakku", image])
+            resp = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Tamilil vilakku", image])
             full += resp.text + "\n"
         send_whatsapp(from_number, full[:4000])
         send_engage_voice(from_number, full)
@@ -116,14 +116,14 @@ def handle_pdf(from_number, doc_id):
 def handle_voice(from_number, audio_id):
     try:
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-        audio_url = requests.get(f"https://graph.facebook.com/v20.0/{audio_id}", headers=headers, timeout=15).json().get("url")
+        audio_url = requests.get(f"https://graph.facebook.com/v26.0/{audio_id}", headers=headers, timeout=15).json().get("url")
         audio_data = requests.get(audio_url, headers=headers, timeout=20).content
         fd, path = tempfile.mkstemp(suffix=".ogg")
         os.close(fd)
         open(path, "wb").write(audio_data)
-        send_engage_voice(from_number, "Voice kidaichiduchu pa")
+        send_engage_voice(from_number, "Voice kidaichiduchu process panren konjam wait pannunga ")
         myfile = gemini_client.files.upload(file=path)
-        response = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Intha voice-a purinthu enna ketkiranga sollu", myfile])
+        response = gemini_client.models.generate_content(model=GEMINI_MODEL_NAME, contents=["Intha voice-a purinthu enna ketkiranga sollunga", myfile])
         answer = response.text
         os.remove(path)
         send_whatsapp(from_number, answer)
@@ -134,7 +134,7 @@ def handle_text_create(from_number, text):
     # Letter create pannuma nu check
     keywords = ["letter", "create", "document", "petition", "manu", "application"]
     if any(k in text.lower() for k in keywords):
-        send_engage_voice(from_number, "Letter create pannuren pa, oru nimisham")
+        send_engage_voice(from_number, "Letter create pannuren ,irunga oru nimisham")
         try:
             # Gemini kita letter content vaangu
             prompt = f"User ketta letter: {text}. Itha formal Tamil/English letter-a create pannu. Date, To, Subject, Body ellam vachu. Simple."
@@ -142,9 +142,9 @@ def handle_text_create(from_number, text):
             letter_content = resp.text
             
             pdf_path = create_letter_pdf(letter_content)
-            send_whatsapp(from_number, f"Letter ready pa! \n\n{letter_content[:2000]}")
+            send_whatsapp(from_number, f"Letter ready ! \n\n{letter_content[:2000]}")
             send_whatsapp_document(from_number, pdf_path, "KanPaarvai_Letter.pdf")
-            send_engage_voice(from_number, "Letter PDF ready pa, anupiten")
+            send_engage_voice(from_number, "Letter PDF ready , ungalukku anupiten")
             os.remove(pdf_path)
             return True
         except Exception as e:
