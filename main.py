@@ -5,21 +5,24 @@ import fitz
 from gtts import gTTS
 
 app = FastAPI()
+
 VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "kanpaarvai123")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
 PHONE_ID = os.environ.get("PHONE_NUMBER_ID")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
+
 processed_ids = set()
-BLOCKED_EXT = ('.exe','.bat','.cmd','.js','.apk','.sh','.msi','.dll','.vbs','.scr')
-BLOCKED_MIMES = ['exe','apk','x-msdownload','octet-stream','x-sh']
+BLOCKED_EXT = ('.exe','.bat','.cmd','.js','.apk','.sh','.msi','.dll','.vbs','.scr','.com','.pif')
+BLOCKED_MIMES = ['exe','apk','x-msdownload','octet-stream','x-sh','x-msdos','application/x-ms']
 
 def clean_tamil(text: str) -> str:
     if not text: return ""
     text = text.replace('$','').replace('*','').replace('`','').replace('#','').replace('_','')
+    text = text.replace('^2',' square').replace('^3',' cube')
     text = re.sub(r'\s+',' ', text)
     return text.strip()
 
-KAN_PROMPT = "Nee Kan Paarvai. Tamil la pesu. Markdown koodathu. Simple Tamil la blind student ku puriyara maathiri sollu pa."
+KAN_PROMPT = """Nee Kan Paarvai. Nee Tamil Nadu blind students ku help pannura AI pa. Tamil la simple-a pesu pa. Dollar, star, markdown ellam koodathu pa. Puriyala nu solla koodathu. Photo la enna irukku, document la enna irukku nu Tamil la theliva sollu pa."""
 
 def send_text(to, txt):
     txt = clean_tamil(txt)[:3500] or "Thirumba anupunga pa"
@@ -73,7 +76,7 @@ def get_media_url(media_id):
 @app.api_route("/", methods=["GET", "HEAD"])
 def home(request: Request):
     if request.method == "HEAD": return PlainTextResponse("ok", 200)
-    return {"status":"Kan Paarvai Live - 503 Fixed"}
+    return {"status":"Kan Paarvai Live - Final Project"}
 
 @app.get("/webhook")
 def verify(request: Request):
@@ -88,12 +91,12 @@ def do_work(from_num, msg, msg_id):
     payload = None
     try:
         if msg['type'] in ['image','document','audio','voice']:
-            send_text(from_num, "Pa file/voice vandhuchu pa! Check panni padikuren pa...")
+            send_text(from_num, "Pa file/voice vandhuchu pa! Check panni padikuren pa, oru nimisham pa...")
 
         if msg['type'] == 'image':
             m_url, status = get_media_url(msg['image']['id'])
             if status != "safe":
-                send_text(from_num, "Ayyo pa! Ithu safe illa pa! Photo mattum anupunga pa.")
+                send_text(from_num, "Pa ithu safe illa pa! Photo mattum anupunga pa.")
                 return
             send_text(from_num, "Pa photo safe-ah irukku pa! Padikuren pa...")
             b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}, timeout=30).content
@@ -136,49 +139,4 @@ def do_work(from_num, msg, msg_id):
 
         if not payload: return
 
-        # ---- 503 FIX WITH BACKOFF PA ----
-        models = ["gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-2.0-flash", "gemini-2.0-flash-lite"]
-        reply = None
-        for model in models:
-            for attempt in range(3):
-                try:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_KEY}"
-                    print(f"Trying {model} attempt {attempt+1}")
-                    r = requests.post(url, json=payload, timeout=60).json()
-                    if 'candidates' in r and r['candidates']:
-                        reply = clean_tamil(r['candidates'][0]['content']['parts'][0]['text'])
-                        print(f"Success with {model}")
-                        break
-                    err = r.get('error',{})
-                    code = err.get('code',0)
-                    print(f"{model} error {code} {err.get('message','')}")
-                    if code in [503,429,500,504]:
-                        time.sleep(2 + attempt*2) # 2s, 4s, 6s wait pa
-                        continue
-                except Exception as e:
-                    print(f"{model} exception {e}")
-                    time.sleep(2)
-                    continue
-            if reply: break
-
-        if reply:
-            send_text(from_num, "Pa padichachu pa! Bathil:")
-            send_text(from_num, reply)
-            send_voice(from_num, reply)
-        else:
-            send_text(from_num, "Pa Google server romba busy pa! 2 nimisham kalichu antha Kasi Tamil Sangamam poster-a thirumba anupunga pa, kandippa padichu tharen pa!")
-
-    except Exception as e:
-        print(f"Work Error {e}")
-        send_text(from_num, "Pa chinna error pa, thirumba anupunga pa!")
-
-@app.post("/webhook")
-async def receive(request: Request, background_tasks: BackgroundTasks):
-    data = await request.json()
-    try:
-        entry = data['entry'][0]['changes'][0]['value']
-        if 'messages' in entry:
-            msg = entry['messages'][0]
-            background_tasks.add_task(do_work, msg['from'], msg, msg.get('id',''))
-    except: pass
-    return {"ok": True}
+        models_to
