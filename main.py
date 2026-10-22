@@ -1,104 +1,160 @@
-import os, base64, requests, re
-from fastapi import FastAPI, Request
-from collections import deque
+from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi.responses import PlainTextResponse
+import requests, os, base64, fitz, uuid, re
 from gtts import gTTS
-import google.generativeai as genai
 
 app = FastAPI()
-
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "kanpaarvai123")
 WHATSAPP_TOKEN = os.environ.get("WHATSAPP_TOKEN")
-PHONE_ID = os.environ.get("PHONE_ID")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
+PHONE_ID = os.environ.get("PHONE_NUMBER_ID")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 
-processed_ids = deque(maxlen=200)
+processed_ids = set()
+
+def clean_tamil(text: str) -> str:
+    if not text: return "Puriyala pa"
+    text = text.replace('$', '').replace('*', '').replace('`', '').replace('#', '').replace('_', '')
+    text = text.replace('^2', ' square').replace('^3', ' cube')
+    text = re.sub(r'x2', 'x square', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 KAN_PROMPT = """
-Nee Kan Paarvai. Tamil maana var kaga Tamil la pesura anbu friend.
-RULES - Kattayam follow pannu:
-1. Photo enna quality la irunthalum, 29kB low quality a irunthalum 'Puriyala' nu SOLLA KOODATHU. Unnaala mudinja varaikum best-a guess panni padichu Tamil la sollu.
-2. Syllabus, Time Table, Question Paper table iruntha month-by-month, row-by-row full-a list pannu. Chinna font a irunthalum padikka try pannu.
-3. Yaaravathu 'letter venum, application venum, document ready pannu' nu ketta, neeye oru perfect formal letter Tamil/English la ready panni kodu.
-4. Reply la $ * # ** symbols use panna koodathu. Clean Tamil la mattum.
-5. Full detail-a Tamil la sollu.
+Nee Kan Paarvai. Tamil la mattum pesu.
+MUKKIYAM: Dollar ($), Star (*), Hash (#), LaTeX, ^ symbol, markdown ellam use panna koodathu. Plain Tamil mattum.
+Maths iruntha 'x square', 'kooda', 'kazhithal', 'samakkuRi' nu Tamil vaartha la sollu.
+Letter/document ketta neeye formal letter ready panni tharanum.
 """
 
-def clean_tamil(text):
-    text = re.sub(r'[\$\*\_\#\`]', '', text)
-    return text.replace('**','').strip()
-
-def get_media_bytes(media_id):
-    m_url = requests.get(f"https://graph.facebook.com/v20.0/{media_id}", 
-        headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).json()['url']
-    return requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
-
-def send_whatsapp(to, msg_text):
-    msg_text = clean_tamil(msg_text)
-    # Text send
+def send_text(to, txt):
+    txt = clean_tamil(txt)[:3500]
     requests.post(f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages",
         headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
-        json={"messaging_product":"whatsapp","to":to,"type":"text","text":{"body":msg_text[:3500]}})
-    # TTS Voice send - ungaloda audio upload code iruntha anga add pannikonga
+        json={"messaging_product": "whatsapp", "to": to, "text": {"body": txt}})
+
+def send_voice(to, txt):
     try:
-        tts = gTTS(text=msg_text[:350], lang='ta')
-        tts.save("/tmp/voice.mp3")
-        # unga existing voice sending logic...
-    except: pass
+        txt = clean_tamil(txt)[:700]
+        file_name = f"/tmp/{uuid.uuid4()}.mp3"
+        gTTS(text=txt, lang='ta', slow=False).save(file_name)
+        with open(file_name, 'rb') as f:
+            up = requests.post(f"https://graph.facebook.com/v20.0/{PHONE_ID}/media",
+                headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+                files={"file": ("voice.mp3", f, "audio/mpeg")},
+                data={"type": "audio/mpeg", "messaging_product": "whatsapp"}).json()
+        if 'id' in up:
+            requests.post(f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages",
+                headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
+                json={"messaging_product": "whatsapp", "to": to, "type": "audio", "audio": {"id": up['id']}})
+    except Exception as ve:
+        print(f"Voice Error: {ve}")
+
+def get_media_url(media_id):
+    try:
+        meta = requests.get(f"https://graph.facebook.com/v20.0/{media_id}", headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).json()
+        # MALWARE ALERT CHECK
+        mime = meta.get('mime_type','')
+        fname = str(meta.get('file_name','')).lower()
+        if any(x in mime or x in fname for x in ['.exe','.bat','.sh','.apk','.dll','application/x-msdownload']):
+            return None, "malware"
+        return meta['url'], "safe"
+    except:
+        return None, "error"
 
 @app.get("/")
-async def home():
-    return {"status": "Kan Paarvai V2 FastAPI Running"}
+def home(): return {"status":"Live clean Tamil pa - Final"}
+@app.get("/webhook")
+def verify(request: Request):
+    if request.query_params.get("hub.verify_token") == VERIFY_TOKEN:
+        return PlainTextResponse(request.query_params.get("hub.challenge"))
+    return PlainTextResponse("fail", 403)
+@app.head("/")
+def head(): return {"ok": True}
+
+def do_work(from_num: str, msg: dict, msg_id: str):
+    if msg_id in processed_ids: return
+    processed_ids.add(msg_id)
+    if len(processed_ids) > 100: processed_ids.clear()
+    
+    tamil_reply = ""
+    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_KEY}"
+    payload = None
+
+    try:
+        # 1. IMAGE
+        if msg['type'] == 'image':
+            m_url, status = get_media_url(msg['image']['id'])
+            if status == "malware":
+                send_text(from_num, "Pa, intha file la virus maathiri irukku pa! Open panna venda pa! ⚠️ Malware Alert!")
+                return
+            img_bytes = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
+            b64_img = base64.b64encode(img_bytes).decode('utf-8')
+            payload = {"contents": [{"parts": [{"text": KAN_PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}]}]}
+
+        # 2. PDF READ + MALWARE
+        elif msg['type'] == 'document':
+            m_url, status = get_media_url(msg['document']['id'])
+            if status == "malware":
+                send_text(from_num, "Pa, intha document dangerous-a irukku pa! .exe/.apk file maathiri irukku, download panna venda pa! ⚠️ Malware Alert!")
+                return
+            pdf_bytes = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
+            tmp_path = f"/tmp/{uuid.uuid4()}.pdf"
+            with open(tmp_path, 'wb') as f: f.write(pdf_bytes)
+            doc = fitz.open(tmp_path)
+            pdf_text = "".join([page.get_text()[:4000] for page in doc[:5]])
+            doc.close()
+            if not pdf_text.strip(): pdf_text = "Scanned PDF, photo maathiri irukku"
+            prompt = f"{KAN_PROMPT}\nIthu PDF text: {pdf_text[:8000]}. Itha Tamil la summary sollu."
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+        # 3. VOICE KU RESPONSE - NEW
+        elif msg['type'] in ['audio','voice']:
+            media_id = msg[msg['type']]['id']
+            m_url, status = get_media_url(media_id)
+            audio_bytes = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
+            b64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+            prompt = KAN_PROMPT + " Ithu oru voice message. Enna pesanraanga nu purinju Tamil la badhil sollu."
+            payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "audio/ogg", "data": b64_audio}}]}]}
+
+        # 4. TEXT + DOCUMENT CREATION - NEW
+        elif msg['type'] == 'text':
+            user_text = msg['text']['body']
+            # Check for malware links
+            if any(x in user_text.lower() for x in ['.exe download','.apk download','free money hack']):
+                send_text(from_num, "Pa, intha link/message suspicious-a irukku pa! Click panna venda pa! ⚠️ Malware Alert!")
+                return
+
+            if any(w in user_text.lower() for w in ['letter','application','resume','petition','certificate','document create','leave letter']):
+                prompt = f"{KAN_PROMPT}\nUser request: {user_text}. Full formal letter/document-a ready panni tharanum. Plain Tamil/English la, no $ * symbols."
+            else:
+                prompt = f"{KAN_PROMPT}\nUser kelvi: {user_text}"
+            payload = {"contents": [{"parts": [{"text": prompt}]}]}
+
+        # GEMINI CALL
+        if payload:
+            g_res = requests.post(gemini_url, json=payload).json()
+            if 'candidates' in g_res:
+                raw = g_res['candidates'][0]['content']['parts'][0]['text']
+                tamil_reply = clean_tamil(raw)
+            else:
+                tamil_reply = "Puriyala pa, konjam theliva anupunga pa"
+
+        if not tamil_reply: return
+
+        # Responding code - Text + Voice rendu anuppuvom
+        send_text(from_num, tamil_reply)
+        send_voice(from_num, tamil_reply[:700])
+
+    except Exception as e:
+        print(f"Work Error: {e}")
 
 @app.post("/webhook")
-async def webhook(req: Request):
-    data = await req.json()
+async def receive(request: Request, background_tasks: BackgroundTasks):
+    data = await request.json()
     try:
         entry = data['entry'][0]['changes'][0]['value']
         if 'messages' not in entry: return {"ok": True}
         msg = entry['messages'][0]
-        
-        if msg['id'] in processed_ids:
-            return {"ok": True}
-        processed_ids.append(msg['id'])
-        
-        from_num = msg['from']
-        parts = []
-
-        # 1. VOICE RECOGNIZE - NEW PA!
-        if msg['type'] in ['audio','voice']:
-            audio_bytes = get_media_bytes(msg[msg['type']]['id'])
-            b64 = base64.b64encode(audio_bytes).decode()
-            parts.append({"text": KAN_PROMPT + " Ithu voice message. Itha kettu purinthu kondu Tamil la badhil sollu. Letter ketta letter ready pannu."})
-            parts.append({"inline_data": {"mime_type": "audio/ogg", "data": b64}})
-
-        # 2. IMAGE - Blur fix + Syllabus fix
-        elif msg['type'] == 'image':
-            img_bytes = get_media_bytes(msg['image']['id'])
-            b64 = base64.b64encode(img_bytes).decode()
-            caption = msg['image'].get('caption','')
-            parts.append({"text": KAN_PROMPT + f" Itha photo va theliva padichu Tamil la sollu. User caption: {caption}"})
-            parts.append({"inline_data": {"mime_type": "image/jpeg", "data": b64}})
-
-        # 3. DOCUMENT / PDF
-        elif msg['type'] == 'document':
-            doc_bytes = get_media_bytes(msg['document']['id'])
-            b64 = base64.b64encode(doc_bytes).decode()
-            parts.append({"text": KAN_PROMPT + " Ithu PDF/document. Itha padichu Tamil la explain pannu."})
-            parts.append({"inline_data": {"mime_type": "application/pdf", "data": b64}})
-
-        # 4. TEXT - Letter preparation
-        else:
-            user_text = msg['text']['body']
-            parts.append({"text": KAN_PROMPT + f" User kelvi: {user_text}. Letter/document venumna full formal letter ready pannu. Illaina Tamil la explain pannu."})
-
-        # Gemini Call
-        model = genai.GenerativeModel("gemini-flash-latest")
-        resp = model.generate_content({"parts": parts}, generation_config={"temperature":0.3})
-        final_text = clean_tamil(resp.text)
-        
-        send_whatsapp(from_num, final_text)
-
-    except Exception as e:
-        print("Error:", e)
-    
+        background_tasks.add_task(do_work, msg['from'], msg, msg.get('id',''))
+    except: pass
     return {"ok": True}
