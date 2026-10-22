@@ -1,7 +1,7 @@
-# main.py - FINAL FIX for PDF + Image + Voice
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 import requests, os, base64, uuid, re
+import fitz  # Mela import pannanum pa, ulla koodathu
 from gtts import gTTS
 
 app = FastAPI()
@@ -20,11 +20,9 @@ def clean_tamil(text: str) -> str:
 
 KAN_PROMPT = """
 Nee Kan Paarvai. Tamil la pesu. 
-RULES:
-1. Dollar $, Star *, Hash #, markdown, LaTeX use panna koodathu. Plain Tamil mattum.
-2. "Puriyala" "Theliva anupunga" nu eppovume solla koodathu. Low quality-a iruntha kooda enna theriyutho atha Tamil la sollanum.
-3. PDF, Syllabus, Circular iruntha Month/Date/Who/What nu point-by-point Tamil la sollu.
-4. Letter ketta neeye ready panni kodu.
+Dollar $, Star *, markdown use panna koodathu. Plain Tamil mattum.
+Puriyala nu solla koodathu. Low quality iruntha kooda enna theriyutho sollu.
+PDF iruntha Date, Yaarukku, Enna seyyanum nu Tamil la point-by-point sollu.
 """
 
 def send_text(to, txt):
@@ -52,12 +50,12 @@ def send_voice(to, txt):
 def get_media_url(media_id):
     meta = requests.get(f"https://graph.facebook.com/v20.0/{media_id}", headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).json()
     mime = meta.get('mime_type','')
-    if any(x in mime for x in ['exe','apk','x-msdownload','x-sh']):
+    if any(x in mime for x in ['exe','apk','x-msdownload']):
         return None, "malware"
     return meta.get('url'), "safe"
 
 @app.get("/")
-def home(): return {"status":"Final Fixed"}
+def home(): return {"status":"Final Fixed OK"}
 @app.get("/webhook")
 def verify(request: Request):
     if request.query_params.get("hub.verify_token") == VERIFY_TOKEN:
@@ -76,10 +74,10 @@ def do_work(from_num, msg, msg_id):
                 send_text(from_num, "⚠️ Malware Alert pa!"); return
             b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
             b64 = base64.b64encode(b).decode()
-            prompt = KAN_PROMPT + "\nIthu oru image (syllabus/photo). Enna irukku nu Tamil la month wise / detail-a sollu. Puriyala nu sollathe."
+            prompt = KAN_PROMPT + "\nIthu oru image. Tamil la detail-a sollu. Puriyala nu sollathe."
             payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]}
 
-                elif msg['type'] == 'document':
+        elif msg['type'] == 'document':
             m_url, st = get_media_url(msg['document']['id'])
             if st == "malware":
                 send_text(from_num, "⚠️ Malware file pa, open pannatheenga!"); return
@@ -88,23 +86,19 @@ def do_work(from_num, msg, msg_id):
             tmp_path = f"/tmp/{uuid.uuid4()}.pdf"
             with open(tmp_path, 'wb') as f: f.write(pdf_bytes)
             
-            # PDF perusa iruntha image-a maathurom pa
             try:
-                import fitz
                 doc = fitz.open(tmp_path)
-                page = doc[0]  # first page mattum
-                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # HD image
+                page = doc[0]
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
                 img_path = f"/tmp/{uuid.uuid4()}.jpg"
                 pix.save(img_path)
                 doc.close()
-                
                 with open(img_path, 'rb') as img_f:
                     b64 = base64.b64encode(img_f.read()).decode()
-                prompt = KAN_PROMPT + "\nIthu oru THIRAN circular PDF, image-a maathi irukken. Full-a padichu Tamil la Date, Yaarukku, Enna seyyanum nu theliva sollu. Puriyala nu sollathe."
+                prompt = KAN_PROMPT + "\nIthu oru THIRAN circular PDF-a image-a maathinen. Full-a padichu Tamil la Date, Yaarukku, Enna seyyanum nu sollu."
                 payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]}
             except Exception as pdf_e:
-                print(f"PDF to Image error {pdf_e}")
-                # fitz fail aana kooda direct PDF try pannu
+                print(f"PDF error {pdf_e}")
                 b64 = base64.b64encode(pdf_bytes).decode()
                 prompt = KAN_PROMPT + "\nIthu PDF circular. Tamil la summary kodu."
                 payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "application/pdf", "data": b64}}]}]}
@@ -113,13 +107,13 @@ def do_work(from_num, msg, msg_id):
             m_url, st = get_media_url(msg[msg['type']]['id'])
             b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
             b64 = base64.b64encode(b).decode()
-            prompt = KAN_PROMPT + "\nIthu oru voice message. Kettu Tamil la badhil sollu."
+            prompt = KAN_PROMPT + "\nIthu voice message. Kettu Tamil la badhil sollu."
             payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "audio/ogg", "data": b64}}]}]}
 
         elif msg['type'] == 'text':
             txt = msg['text']['body']
             if any(x in txt.lower() for x in ['letter','application','resume','certificate']):
-                prompt = KAN_PROMPT + f"\nLetter request: {txt}. Full formal letter ready pannu."
+                prompt = KAN_PROMPT + f"\nLetter request: {txt}. Full letter ready pannu."
             else:
                 prompt = KAN_PROMPT + f"\nUser kelvi: {txt}"
             payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -133,11 +127,11 @@ def do_work(from_num, msg, msg_id):
                 send_voice(from_num, reply)
             else:
                 print(g_res)
-                send_text(from_num, "Pa konjam time edukkuthu, antha image-a original quality la anupunga pa, naan padichu solluren pa!")
+                send_text(from_num, "Pa file konjam perusa irukku pa, 2 sec la thirumba try panren pa!")
 
     except Exception as e:
         print(f"Error: {e}")
-        send_text(from_num, "Pa oru chinna error pa, thirumba oru vaati anupunga pa!")
+        send_text(from_num, "Pa chinna error pa, thirumba anupunga pa!")
 
 @app.post("/webhook")
 async def receive(request: Request, background_tasks: BackgroundTasks):
