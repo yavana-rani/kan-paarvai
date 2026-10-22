@@ -79,15 +79,35 @@ def do_work(from_num, msg, msg_id):
             prompt = KAN_PROMPT + "\nIthu oru image (syllabus/photo). Enna irukku nu Tamil la month wise / detail-a sollu. Puriyala nu sollathe."
             payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]}
 
-        elif msg['type'] == 'document':
+                elif msg['type'] == 'document':
             m_url, st = get_media_url(msg['document']['id'])
             if st == "malware":
                 send_text(from_num, "⚠️ Malware file pa, open pannatheenga!"); return
-            b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
-            b64 = base64.b64encode(b).decode()
-            # IMPORTANT FIX: PDF-a apdiye anuppurom, text extract pannala
-            prompt = KAN_PROMPT + "\nIthu oru PDF circular/document. Scanned-a iruntha kooda OCR panni Tamil la full summary kodu. Date, yaarukku, enna action nu sollu."
-            payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "application/pdf", "data": b64}}]}]}
+            
+            pdf_bytes = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
+            tmp_path = f"/tmp/{uuid.uuid4()}.pdf"
+            with open(tmp_path, 'wb') as f: f.write(pdf_bytes)
+            
+            # PDF perusa iruntha image-a maathurom pa
+            try:
+                import fitz
+                doc = fitz.open(tmp_path)
+                page = doc[0]  # first page mattum
+                pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # HD image
+                img_path = f"/tmp/{uuid.uuid4()}.jpg"
+                pix.save(img_path)
+                doc.close()
+                
+                with open(img_path, 'rb') as img_f:
+                    b64 = base64.b64encode(img_f.read()).decode()
+                prompt = KAN_PROMPT + "\nIthu oru THIRAN circular PDF, image-a maathi irukken. Full-a padichu Tamil la Date, Yaarukku, Enna seyyanum nu theliva sollu. Puriyala nu sollathe."
+                payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]}
+            except Exception as pdf_e:
+                print(f"PDF to Image error {pdf_e}")
+                # fitz fail aana kooda direct PDF try pannu
+                b64 = base64.b64encode(pdf_bytes).decode()
+                prompt = KAN_PROMPT + "\nIthu PDF circular. Tamil la summary kodu."
+                payload = {"contents": [{"parts": [{"text": prompt}, {"inline_data": {"mime_type": "application/pdf", "data": b64}}]}]}
 
         elif msg['type'] in ['audio','voice']:
             m_url, st = get_media_url(msg[msg['type']]['id'])
