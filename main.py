@@ -114,7 +114,7 @@ def do_work(from_num, msg, msg_id):
         if msg['type'] == 'image':
             m_url, status = get_media_url(msg['image']['id'])
             if status != "safe":
-                send_text(from_num, "⚠️ Ayyo pa! Ithu safe illa pa! Photo mattum anupunga pa.")
+                send_text(from_num, "Pa file romba perusu pa (10MB mela). Chinna file anupunga pa.")
                 return
             send_text(from_num, "🧠 Pa photo safe-ah irukku pa! Ipo padikuren pa...")
             b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}, timeout=20).content
