@@ -67,8 +67,8 @@ def send_voice(to, txt):
                 cur = sentence + ". "
         if cur:
             parts.append(cur.strip())
-        if len(parts) > 3:
-            parts = parts[:3]
+        if len(parts) > 4:
+            parts = parts[:4]
 
         for chunk in parts:
             if len(chunk) < 5:
@@ -139,7 +139,7 @@ def do_work(from_num, msg, msg_id):
     payload = None
     try:
         if msg['type'] in ['image','document','audio','voice']:
-            send_text(from_num, "Pa file vandhuchu pa! Padikuren pa...")
+            send_text(from_num, " file vandhuchu pa! Padikuren pa...")
 
         if msg['type'] == 'image':
             m_url, status = get_media_url(msg['image']['id'])
