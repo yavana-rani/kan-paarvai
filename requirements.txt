@@ -4,5 +4,5 @@ requests
 gtts
 fpdf2
 pillow
-PyMuPDF
+PyMuPDF==1.23.26
 
