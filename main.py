@@ -33,7 +33,55 @@ def send_text(to, txt):
         )
     except Exception:
         pass
+def send_voice(to, txt):
+    try:
+        clean = clean_tamil(txt)
+        if not clean:
+            return
+        # Tamil text-a 400 char ku mela break pannu pa - ippo voice break aagathu pa!
+        parts = []
+        cur = ""
+        for sentence in clean.split('.'):
+            if len(cur) + len(sentence) < 400:
+                cur = cur + sentence + ". "
+            else:
+                if cur:
+                    parts.append(cur.strip())
+                cur = sentence + ". "
+        if cur:
+            parts.append(cur.strip())
+        if len(parts) > 3:
+            parts = parts[:3]
 
+        for chunk in parts:
+            if not chunk:
+                continue
+            fn = f"/tmp/{uuid.uuid4()}.mp3"
+            gTTS(text=chunk, lang='ta', slow=False).save(fn)
+            with open(fn, 'rb') as f:
+                up = requests.post(
+                    f"https://graph.facebook.com/v20.0/{PHONE_ID}/media",
+                    headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"},
+                    files={"file": ("voice.mp3", f, "audio/mpeg")},
+                    data={"type": "audio/mpeg", "messaging_product": "whatsapp"}
+                ).json()
+            if 'id' in up:
+                requests.post(
+                    f"https://graph.facebook.com/v20.0/{PHONE_ID}/messages",
+                    headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}", "Content-Type": "application/json"},
+                    json={
+                        "messaging_product": "whatsapp",
+                        "to": to,
+                        "type": "audio",
+                        "audio": {"id": up['id']}
+                    }
+                )
+            try:
+                os.remove(fn)
+            except:
+                pass
+    except Exception as e:
+        print(f"Voice Error {e}")
 def get_media_url(media_id):
     try:
         meta = requests.get(
@@ -69,7 +117,11 @@ def do_work(from_num, msg, msg_id):
     processed_ids.add(msg_id)
     if len(processed_ids) > 100:
         processed_ids.clear()
-
+        if reply is not None:
+            send_text(from_num, reply)
+            send_voice(from_num, reply)  # <-- ITHA ADD PANNUNGA PA!
+        else:
+            send_text(from_num, "Pa Google server busy pa! 1 nimisham kalichu anupunga pa!")
     payload = None
     try:
         if msg['type'] in ['image','document','audio','voice']:
