@@ -23,6 +23,14 @@ def clean_tamil(text):
     return text.strip()
     
 KAN_PROMPT = "Nee Kan Paarvai. Tamil la simple-a pesu pa. Photo document la enna irukku nu Tamil la sollu pa."
+# PROMPT-A INGA MAATHUNGA PA!
+
+SYSTEM_PROMPT = """
+You are Kan Paarvai, a helpful assistant for visually impaired users.
+RULE: You MUST ALWAYS reply ONLY in Tamil (Tanglish style - Tamil written in English letters is also okay pa).
+Never reply in English. Even if user asks in English, you MUST reply in Tamil only pa.
+Be friendly and add 'pa' at end of sentences.
+"""
 
 def send_text(to, txt):
     try:
@@ -146,7 +154,14 @@ def pdf_to_photos_and_read(media_id, token):
         full_text += page_text + "\n"
     
     return full_text
-
+# Gemini call pannum edathula pa:
+response = client.models.generate_content(
+    model="gemini-2.0-flash",
+    contents=[
+        SYSTEM_PROMPT + "\n\nUser content: " + user_text,
+        image # if photo
+    ]
+         )
 def gemini_read_image(image):
     # Gemini 2.5 / 3.8 Flash ku image kuduthu padikka veikkrom pa
     response = gemini_client.models.generate_content(
