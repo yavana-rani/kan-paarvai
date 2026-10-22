@@ -34,15 +34,28 @@ def send_text(to, txt):
     except Exception:
         pass
 
+def clean_for_voice(text):
+    # Voice ku mattum super clean pa - quote bracket ellam remove pa!
+    if not text:
+        return ""
+    text = text.replace('"',' ').replace("'"," ").replace('(',' ').replace(')',' ')
+    text = text.replace('[',' ').replace(']',' ').replace('{',' ').replace('}',' ')
+    text = text.replace('$','').replace('*','').replace('`','').replace('#','').replace('_','')
+    text = text.replace('/',' ').replace('\\',' ').replace('|',' ')
+    text = re.sub(r'\s+',' ', text)
+    return text.strip()
+
 def send_voice(to, txt):
     try:
-        clean = clean_tamil(txt)
+        clean = clean_for_voice(txt)
         if not clean:
             return
         parts = []
         cur = ""
         for sentence in clean.split('.'):
-            if len(cur) + len(sentence) < 400:
+            if not sentence.strip():
+                continue
+            if len(cur) + len(sentence) < 380:
                 cur = cur + sentence + ". "
             else:
                 if cur:
@@ -54,7 +67,7 @@ def send_voice(to, txt):
             parts = parts[:3]
 
         for chunk in parts:
-            if not chunk:
+            if len(chunk) < 5:
                 continue
             fn = f"/tmp/{uuid.uuid4()}.mp3"
             gTTS(text=chunk, lang='ta', slow=False).save(fn)
