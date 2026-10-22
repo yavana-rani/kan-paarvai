@@ -33,12 +33,12 @@ def send_text(to, txt):
         )
     except Exception:
         pass
+
 def send_voice(to, txt):
     try:
         clean = clean_tamil(txt)
         if not clean:
             return
-        # Tamil text-a 400 char ku mela break pannu pa - ippo voice break aagathu pa!
         parts = []
         cur = ""
         for sentence in clean.split('.'):
@@ -82,6 +82,7 @@ def send_voice(to, txt):
                 pass
     except Exception as e:
         print(f"Voice Error {e}")
+
 def get_media_url(media_id):
     try:
         meta = requests.get(
@@ -117,11 +118,7 @@ def do_work(from_num, msg, msg_id):
     processed_ids.add(msg_id)
     if len(processed_ids) > 100:
         processed_ids.clear()
-        if reply is not None:
-            send_text(from_num, reply)
-            send_voice(from_num, reply)  # <-- ITHA ADD PANNUNGA PA!
-        else:
-            send_text(from_num, "Pa Google server busy pa! 1 nimisham kalichu anupunga pa!")
+
     payload = None
     try:
         if msg['type'] in ['image','document','audio','voice']:
@@ -222,8 +219,10 @@ def do_work(from_num, msg, msg_id):
             if reply is not None:
                 break
 
+        # ---- FIXED VOICE PART PA ----
         if reply is not None:
             send_text(from_num, reply)
+            send_voice(from_num, reply)
         else:
             send_text(from_num, "Pa Google server busy pa! 1 nimisham kalichu anupunga pa!")
 
