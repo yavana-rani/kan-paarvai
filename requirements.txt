@@ -5,4 +5,4 @@ gtts
 fpdf2
 pillow
 PyMuPDF
-
+python-multipart
