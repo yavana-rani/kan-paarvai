@@ -114,7 +114,46 @@ def get_media_url(media_id):
         return meta.get('url'), "safe"
     except Exception:
         return None, "error"
+import fitz  # PyMuPDF
+from PIL import Image
+import io
 
+def pdf_to_photos_and_read(media_id, token):
+    # 1. PDF download (mela sonna function pa)
+    pdf_path = download_whatsapp_media(media_id, token) # /tmp/temp.pdf
+    
+    doc = fitz.open(pdf_path)
+    full_text = ""
+    
+    for i in range(min(len(doc), 3)): # Muthal 3 page mattum pa
+        page = doc[i]
+        
+        # Text irukka nu paarkrom pa
+        text = page.get_text().strip()
+        
+        if len(text) < 50: # Text illa na - Scanned photo pa!
+            print(f"Page {i+1} scanned pa, photo va maathuren pa!")
+            # PHOTO VA MAATHUREN PA - ITHU THAN TRICK PA!
+            pix = page.get_pixmap(dpi=200)
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            
+            # Itha Gemini vision ku anuppanum pa
+            # gemini_model.generate_content([prompt, img])
+            page_text = gemini_read_image(img) 
+        else:
+            page_text = text
+            
+        full_text += page_text + "\n"
+    
+    return full_text
+
+def gemini_read_image(image):
+    # Gemini 2.5 / 3.8 Flash ku image kuduthu padikka veikkrom pa
+    response = gemini_client.models.generate_content(
+        model="gemini-2.0-flash",
+        contents=["Itha full-a Tamil la padichu sollu pa, enna irukku nu theliva:", image]
+    )
+    return response.text
 @app.api_route("/", methods=["GET", "HEAD"])
 def home(request: Request):
     if request.method == "HEAD":
