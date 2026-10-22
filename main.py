@@ -61,60 +61,83 @@ def verify(request: Request):
     if request.query_params.get("hub.verify_token") == VERIFY_TOKEN:
         return PlainTextResponse(request.query_params.get("hub.challenge"))
     return PlainTextResponse("fail", 403)
-
 def do_work(from_num, msg, msg_id):
     if msg_id in processed_ids: return
     processed_ids.add(msg_id)
     if len(processed_ids) > 100: processed_ids.clear()
-    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_KEY}"
+    
+    # Payload prepare - same as before, but text-a mattum edukkrom
     payload = None
     try:
         if msg['type'] == 'image':
-            m_url, st = get_media_url(msg['image']['id'])
-            b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
+            m_url, _ = get_media_url(msg['image']['id'])
+            b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}, timeout=20).content
             b64 = base64.b64encode(b).decode()
-            payload = {"contents": [{"parts": [{"text": KAN_PROMPT + " Ithu image, Tamil la sollu. Puriyala nu sollathe."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]}
+            payload = {"contents": [{"parts": [{"text": KAN_PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]}
 
         elif msg['type'] == 'document':
-            m_url, st = get_media_url(msg['document']['id'])
-            pdf_bytes = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
-            tmp_path = f"/tmp/{uuid.uuid4()}.pdf"
-            with open(tmp_path, 'wb') as f: f.write(pdf_bytes)
-            try:
+            m_url, _ = get_media_url(msg['document']['id'])
+            file_name = msg['document'].get('filename','').lower()
+            doc_bytes = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}, timeout=20).content
+            
+            extracted_text = ""
+            if file_name.endswith(('.html','.htm')):
+                extracted_text = doc_bytes.decode('utf-8', errors='ignore')[:8000] # 8k mattum
+            else:
+                tmp_path = f"/tmp/{uuid.uuid4()}.pdf"
+                with open(tmp_path, 'wb') as f: f.write(doc_bytes)
                 doc = fitz.open(tmp_path)
-                page = doc[0]
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5)) # 2 ku badhila 1.5 - size kuraiya
-                img_path = f"/tmp/{uuid.uuid4()}.jpg"
-                pix.save(img_path)
+                for page in doc:
+                    extracted_text += page.get_text() + "\n"
+                    if len(extracted_text) > 8000: break # Seekram break
                 doc.close()
-                with open(img_path, 'rb') as img_f:
-                    b64 = base64.b64encode(img_f.read()).decode()
-                payload = {"contents": [{"parts": [{"text": KAN_PROMPT + " PDF image-a maathinen, Tamil la summary kodu."}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}]}
-            except Exception as e:
-                print(f"PDF to img fail {e}")
-                b64 = base64.b64encode(pdf_bytes).decode()
-                payload = {"contents": [{"parts": [{"text": KAN_PROMPT + " PDF Tamil summary kodu"}, {"inline_data": {"mime_type": "application/pdf", "data": b64}}]}]}
-
-        elif msg['type'] in ['audio','voice']:
-            m_url, st = get_media_url(msg[msg['type']]['id'])
-            b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}).content
-            b64 = base64.b64encode(b).decode()
-            payload = {"contents": [{"parts": [{"text": KAN_PROMPT + " Voice message, Tamil la badhil"}, {"inline_data": {"mime_type": "audio/ogg", "data": b64}}]}]}
+            payload = {"contents": [{"parts": [{"text": KAN_PROMPT + f" File: {file_name}\n{extracted_text[:8000]}"}]}]}
 
         elif msg['type'] == 'text':
             payload = {"contents": [{"parts": [{"text": KAN_PROMPT + f" Kelvi: {msg['text']['body']}"}]}]}
+        elif msg['type'] in ['audio','voice']:
+            m_url, _ = get_media_url(msg[msg['type']]['id'])
+            b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}, timeout=20).content
+            b64 = base64.b64encode(b).decode()
+            payload = {"contents": [{"parts": [{"text": KAN_PROMPT + " Voice Tamil la"}, {"inline_data": {"mime_type": "audio/ogg", "data": b64}}]}]}
 
-        if payload:
-            g_res = requests.post(gemini_url, json=payload, timeout=30).json()
-            if 'candidates' in g_res:
-                reply = clean_tamil(g_res['candidates'][0]['content']['parts'][0]['text'])
-                send_text(from_num, reply)
-                send_voice(from_num, reply)
-            else:
-                print(g_res)
-                send_text(from_num, "Pa konjam network slow pa, original quality la thirumba anupunga pa!")
+        if not payload: return
+
+        # GEMINI CALL WITH RETRY - ithu than main fix pa
+        models_to_try = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-flash-latest"]
+        reply = None
+        
+        for model_name in models_to_try:
+            for attempt in range(2): # 2 vaati try
+                try:
+                    gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_KEY}"
+                    print(f"Trying {model_name} attempt {attempt+1}")
+                    g_res = requests.post(gemini_url, json=payload, timeout=60).json() # 60 sec aakiten pa!
+                    
+                    if 'candidates' in g_res:
+                        reply = clean_tamil(g_res['candidates'][0]['content']['parts'][0]['text'])
+                        break
+                    if g_res.get('error',{}).get('code') in [503, 429, 504]:
+                        print(f"{model_name} busy {g_res['error']['code']}")
+                        continue
+                except requests.exceptions.ReadTimeout:
+                    print(f"{model_name} timeout, retrying...")
+                    continue
+                except Exception as e:
+                    print(f"{model_name} error {e}")
+                    continue
+            if reply: break
+
+        if reply:
+            send_text(from_num, reply)
+            send_voice(from_num, reply)
+        else:
+            send_text(from_num, "Pa Google server konjam busy pa! 1 nimisham kalichu thirumba anupunga pa, naan ready-a irukken pa!")
+
     except Exception as e:
         print(f"Work Error {e}")
+        send_text(from_num, "Pa oru chinna error pa, thirumba anupunga pa!")
+
 
 @app.post("/webhook")
 async def receive(request: Request, background_tasks: BackgroundTasks):
