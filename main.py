@@ -12,13 +12,16 @@ PHONE_ID = os.environ.get("PHONE_NUMBER_ID")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 
 processed_ids = set()
-
+ 
 def clean_tamil(text):
-    if not text:
-        return ""
+    # Text display ku - azhaga enter-oda irukkum pa
+    if not text: return ""
+    # Enter-a mattum oru space-a mathuvom, 2 enter iruntha paragraph gap pa
     text = text.replace('$','').replace('*','').replace('`','').replace('#','').replace('_','')
+    text = text.replace('\r','')
+    text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
-
+    
 KAN_PROMPT = "Nee Kan Paarvai. Tamil la simple-a pesu pa. Photo document la enna irukku nu Tamil la sollu pa."
 
 def send_text(to, txt):
@@ -35,12 +38,13 @@ def send_text(to, txt):
         pass
 
 def clean_for_voice(text):
-    # Voice ku mattum super clean pa - quote bracket ellam remove pa!
+    # Voice ku mattum - enter, quote ellam full remove pa!
     if not text:
         return ""
+    text = text.replace('\n',' ').replace('\r',' ').replace('\t',' ')
     text = text.replace('"',' ').replace("'"," ").replace('(',' ').replace(')',' ')
     text = text.replace('[',' ').replace(']',' ').replace('{',' ').replace('}',' ')
-    text = text.replace('$','').replace('*','').replace('`','').replace('#','').replace('_','')
+    text = text.replace('$','').replace('*','').replace('`','').replace('#','')
     text = text.replace('/',' ').replace('\\',' ').replace('|',' ')
     text = re.sub(r'\s+',' ', text)
     return text.strip()
