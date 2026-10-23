@@ -192,13 +192,57 @@ def do_work(from_num, msg, msg_id):
 
     payload = None
     try:
+     # WhatsApp document vandha idam pa - ITHA FULL-A MAATHUNGA PA!
+
+if message_type == "document":
+    document = message.get("document", {})
+    media_id = document.get("id")
+    file_name = document.get("filename", "file.pdf")
+    
+    print(f"PDF vandhuchu pa! ID: {media_id}, Name: {file_name}")
+    
+    # ITHU THAN MAIN FIX PA! Download pannanum!
+    try:
+        # Step 1: Media URL vaanguren pa
+        graph_url = f"https://graph.facebook.com/v19.0/{media_id}"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        
+        r = requests.get(graph_url, headers=headers).json()
+        media_url = r['url'] # Ithu than original file link pa
+        
+        # Step 2: File-a download panren pa
+        pdf_content = requests.get(media_url, headers=headers).content
+        temp_path = f"/tmp/{file_name}"
+        with open(temp_path, "wb") as f:
+            f.write(pdf_content)
+        
+        print(f"Download success pa! {temp_path}")
+        
+        # Step 3: Ipo than PDF-a photo va maathi padikkrom pa!
+        # (Namakku munna panna trick pa)
+        import fitz
+        doc = fitz.open(temp_path)
+        page = doc[0]
+        pix = page.get_pixmap(dpi=200)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        
+        # Gemini kitta anuppi Tamil la padikka vaikkom pa
+        result = gemini_read_image_and_give_tamil(img)
+        send_whatsapp_message(sender, result)
+        send_voice_message(sender, result) # Tamil voice pa!
+
+    except Exception as e:
+        print(f"Error pa: {e}")
+        send_whatsapp_message(sender, f"PDF download la error pa: {e}")
+    
+    return # Mukkiyam pa! Keela ulla thappu message poga koodathu pa!
         if msg['type'] in ['image','document','audio','voice']:
-            send_text(from_num, " file vandhuchu pa! Padikuren pa...")
+            send_text(from_num, " file vandhuruchu pa! Padikuren konjam wait pannunga...")
 
         if msg['type'] == 'image':
             m_url, status = get_media_url(msg['image']['id'])
             if status != "safe":
-                send_text(from_num, "Pa photo safe illa pa!")
+                send_text(from_num, "photo safe illa pa, kavanam!")
                 return
             b = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}, timeout=30).content
             b64 = base64.b64encode(b).decode()
@@ -214,7 +258,7 @@ def do_work(from_num, msg, msg_id):
         elif msg['type'] == 'document':
             m_url, status = get_media_url(msg['document']['id'])
             if status != "safe":
-                send_text(from_num, "Pa file safe illa pa!")
+                send_text(from_num, "file safe illa pa kavanam!")
                 return
             doc_bytes = requests.get(m_url, headers={"Authorization": f"Bearer {WHATSAPP_TOKEN}"}, timeout=30).content
             fname = msg['document'].get('filename','doc').lower()
@@ -295,7 +339,7 @@ def do_work(from_num, msg, msg_id):
             send_text(from_num, reply)
             send_voice(from_num, reply)
         else:
-            send_text(from_num, "Pa Google server busy pa! 1 nimisham kalichu anupunga pa!")
+            send_text(from_num, "Pa Google server busy pa! 1 nimisham kalichu anupunga!")
 
     except Exception as e:
         print(f"Work Error {e}")
