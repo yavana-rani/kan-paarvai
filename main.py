@@ -18,7 +18,24 @@ from gtts import gTTS
 from google import genai
 from google.genai import types
 from docx import Document
+# KEELA IRUKKURA 2 ROUTE-A MATTUM MATHUNGA PA - MEELA ELLAM SAME PA!
 
+@app.get("/")
+@app.head("/")
+def home():
+    return {"status": "Kan Paarvai AI running pa"}
+
+# Itha PUDHUSA add pannunga - HEAD 405 pogum pa
+@app.api_route("/", methods=["HEAD"])
+def head_home():
+    return {"status": "ok"}
+
+@app.get("/webhook")
+def verify(request: Request):
+    q = request.query_params
+    if VERIFY_TOKEN and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == VERIFY_TOKEN:
+        return PlainTextResponse(q.get("hub.challenge", ""))
+    return PlainTextResponse("fail", status_code=403)
 # ---------- CONFIG ----------
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
