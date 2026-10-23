@@ -87,22 +87,40 @@ def ask_gemini(contents):
     if not client:
         raise RuntimeError("GEMINI_API_KEY அமைக்கப்படவில்லை.")
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=contents,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            temperature=0.2,
-            max_output_tokens=4096,
-        ),
-    )
+    # Mudhalla namma model, quota thinthu pona backup models pa
+    models_to_try = [
+        os.getenv("GEMINI_MODEL", "gemini-2.0-flash"),
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b"
+    ]
 
-    answer = getattr(response, "text", None)
-    if not answer:
-        raise RuntimeError("Gemini பதில் கிடைக்கவில்லை.")
-
-    return clean_text(answer)
-
+    last_error = None
+    for model_name in models_to_try:
+        try:
+            log.info(f"Trying {model_name} attempt")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_PROMPT,
+                    temperature=0.2,
+                    max_output_tokens=4096,
+                ),
+            )
+            answer = getattr(response, "text", None)
+            if answer:
+                return clean_text(answer)
+        except Exception as e:
+            last_error = e
+            log.warning(f"{model_name} failed: {e}")
+            # 429 quota error na adutha model ku po pa
+            if "429" in str(e) or "quota" in str(e).lower():
+                continue
+            else:
+                continue
+    
+    raise RuntimeError(f"Gemini quota thinthuduchu pa: {last_error}")
 
 # ---------- WHATSAPP API ----------
 
