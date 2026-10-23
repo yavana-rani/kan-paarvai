@@ -18,24 +18,7 @@ from gtts import gTTS
 from google import genai
 from google.genai import types
 from docx import Document
-# KEELA IRUKKURA 2 ROUTE-A MATTUM MATHUNGA PA - MEELA ELLAM SAME PA!
 
-@app.get("/")
-@app.head("/")
-def home():
-    return {"status": "Kan Paarvai AI running pa"}
-
-# Itha PUDHUSA add pannunga - HEAD 405 pogum pa
-@app.api_route("/", methods=["HEAD"])
-def head_home():
-    return {"status": "ok"}
-
-@app.get("/webhook")
-def verify(request: Request):
-    q = request.query_params
-    if VERIFY_TOKEN and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == VERIFY_TOKEN:
-        return PlainTextResponse(q.get("hub.challenge", ""))
-    return PlainTextResponse("fail", status_code=403)
 # ---------- CONFIG ----------
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
@@ -229,6 +212,11 @@ def handle_media(data, mime, fname, caption):
     mime = (mime or "").lower()
     name = (fname or "").lower()
 
+    if mime.startswith("audio/"):
+        clean_mime = mime.split(";")[0].strip()
+        part = types.Part.from_bytes(data=data, mime_type=clean_mime)
+        return ask_gemini([caption or "இந்தக் குரல் செய்தியைக் கேட்டு தமிழில் பதிலளிக்கவும்", part])
+
     if mime.startswith("image/"):
         img = Image.open(BytesIO(data)).convert("RGB")
         prompt = caption or "இந்தப் படத்தை தமிழில் விளக்கவும்"
@@ -276,14 +264,14 @@ def process_message(sender, message, message_id):
                 return
             reply = ask_gemini(user_text)
 
-        elif kind in ("image", "document"):
+        elif kind in ("image", "document", "audio", "voice"):
             info = message.get(kind, {})
             data, mime = download_media(info.get("id"))
             reply = handle_media(
                 data, mime, info.get("filename", ""), (info.get("caption") or "").strip()
             )
         else:
-            safe_send_text(sender, "Text, image, PDF, Word file mattum anuppunga pa")
+            safe_send_text(sender, "Text, voice, image, PDF, Word file mattum anuppunga pa")
             return
 
         send_text(sender, reply)
@@ -312,7 +300,7 @@ def valid_signature(body: bytes, header: str) -> bool:
     return hmac.compare_digest(expected, header.split("=", 1)[1])
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def home():
     return {"status": "Kan Paarvai AI running pa"}
 
