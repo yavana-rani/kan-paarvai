@@ -26,8 +26,11 @@ PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "")
 GRAPH_VERSION = os.getenv("GRAPH_API_VERSION", "v22.0")
-# Old 1.5 models are retired (404). Override via env if Google changes names again.
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+# Old 1.5 retired, 3.8 quota 20/day. Use stable high-quota model pa
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+FALLBACK_MODELS = [m.strip() for m in os.getenv(
+    "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-1.5-flash"
+).split(",") if m.strip()]
 FALLBACK_MODELS = [m.strip() for m in os.getenv(
     "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-2.0-flash"
 ).split(",") if m.strip()]
