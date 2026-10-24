@@ -197,18 +197,26 @@ def send_voice(to, text):
     spoken = clean_voice_text(text)
     if not spoken:
         return
-    path = None
-    try:
-        fd, path = tempfile.mkstemp(suffix=".mp3")
-        os.close(fd)
-        gTTS(text=spoken[:600], lang="ta", slow=False).save(path)
-        send_audio(to, path)
-    except Exception:
-        log.exception("voice failed")
-    finally:
-        if path and os.path.exists(path):
-            os.remove(path)
+    
+    # Full text-a chunk-a split pannrom pa - 1 part = 350 letters (~25 sec) pa
+    # Ippo full PDF-um voice la varum pa, cut aagathu pa!
+    chunks = [spoken[i:i+350] for i in range(0, len(spoken), 350)]
+    # Max 5 part (avoid spam) pa - romba perusa iruntha first 5 part mattum pa
+    chunks = chunks[:5]
 
+    for idx, chunk in enumerate(chunks):
+        path = None
+        try:
+            fd, path = tempfile.mkstemp(suffix=".mp3")
+            os.close(fd)
+            gTTS(text=chunk, lang="ta", slow=False).save(path)
+            send_audio(to, path)
+            log.info(f"Voice part {idx+1}/{len(chunks)} sent")
+        except Exception:
+            log.exception(f"voice part {idx+1} failed")
+        finally:
+            if path and os.path.exists(path):
+                os.remove(path)
 
 # ---------- MEDIA HANDLING ----------
 def handle_media(data, mime, fname, caption):
