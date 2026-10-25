@@ -1,13 +1,17 @@
 import os
 import re
+import json
 import hmac
 import hashlib
 import logging
 import tempfile
 import threading
+import html as htmllib
 from collections import OrderedDict
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 import fitz  # PyMuPDF
@@ -28,14 +32,16 @@ META_APP_SECRET = os.getenv("META_APP_SECRET", "")
 GRAPH_VERSION = os.getenv("GRAPH_API_VERSION", "v22.0")
 # Old 1.5 retired, 3.8 quota 20/day. Use stable high-quota model pa
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-FALLBACK_MODELS = [m.strip() for m in os.getenv(
-    "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-1.5-flash"
-).split(",") if m.strip()]
+# (this was defined twice before; the second one was the one actually used)
 FALLBACK_MODELS = [m.strip() for m in os.getenv(
     "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-2.0-flash"
 ).split(",") if m.strip()]
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
 MAX_PDF_IMAGE_PAGES = 5
+
+# Fonts for PDF creation: put NotoSansTamil-Regular.ttf and
+# NotoSans-Regular.ttf inside a "fonts" folder next to this file.
+FONT_DIR = str(Path(__file__).resolve().parent / "fonts")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("kan-paarvai")
@@ -85,7 +91,8 @@ def clean_voice_text(text):
 
 
 # ---------- GEMINI WITH FALLBACK ----------
-def ask_gemini(contents):
+# system / clean are optional, so every old call ask_gemini(x) works as before.
+def ask_gemini(contents, system=SYSTEM_PROMPT, clean=True):
     if not client:
         raise RuntimeError("GEMINI_API_KEY not set")
 
@@ -102,14 +109,14 @@ def ask_gemini(contents):
                 model=model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
+                    system_instruction=system,
                     temperature=0.2,
                     max_output_tokens=4096,
                 ),
             )
             text = getattr(resp, "text", None)
             if text:
-                return clean_text(text)
+                return clean_text(text) if clean else text
             log.warning("%s returned empty text", model_name)
         except Exception as e:
             last_err = e
@@ -174,6 +181,16 @@ def send_audio(to, path):
     })
 
 
+def send_document(to, path, filename="letter.pdf"):
+    mid = upload_media(path, "application/pdf")
+    graph_post("messages", {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "document",
+        "document": {"id": mid, "filename": filename},
+    })
+
+
 def download_media(media_id):
     r = requests.get(f"{GRAPH}/{media_id}", headers=auth_headers(), timeout=30)
     r.raise_for_status()
@@ -197,7 +214,7 @@ def send_voice(to, text):
     spoken = clean_voice_text(text)
     if not spoken:
         return
-    
+
     # Full text-a chunk-a split pannrom pa - 1 part = 350 letters (~25 sec) pa
     # Ippo full PDF-um voice la varum pa, cut aagathu pa!
     chunks = [spoken[i:i+350] for i in range(0, len(spoken), 350)]
@@ -217,6 +234,157 @@ def send_voice(to, text):
         finally:
             if path and os.path.exists(path):
                 os.remove(path)
+
+
+# ---------- LETTER / PDF CREATION ----------
+BLANK = "____________"
+
+# cheap pre-filter so normal chat doesn't cost an extra Gemini call
+LETTER_KEYWORDS = (
+    "letter", "application", "resume", "cv", "bonafide", "complaint",
+    "kadithum", "kaditham", "கடிதம்", "விடுப்பு", "விண்ணப்பம்", "pdf",
+)
+
+LETTER_PROMPT = """You help write formal documents.
+Read the user's request and reply with ONLY one JSON object, no markdown fences:
+{
+ "wants_document": true or false,
+ "language": "ta" or "en",
+ "doc_type": "leave letter",
+ "sender_name": "", "sender_address": "",
+ "recipient_title": "", "recipient_address": "",
+ "date": "", "subject": "", "salutation": "",
+ "body": "", "closing": "", "signature_name": ""
+}
+Rules:
+- wants_document is true only if the user is asking you to write a letter,
+  application, complaint, resume or similar document. Normal questions = false.
+- language: "en" if the user asks for English or writes the request in English.
+  "ta" if they ask for Tamil or write in Tamil / Tanglish and do not ask for English.
+- Write every text field in that language. For "ta" use Tamil script only.
+- NEVER invent names, addresses or dates. Use "" for anything the user did not give.
+- body: the letter paragraphs only, separated by \\n\\n. No subject, no greeting.
+- salutation like "Respected Sir/Madam," or "மதிப்பிற்குரிய ஐயா/அம்மையீர்,".
+- closing like "Thanking you," / "நன்றி,". No explanations outside the JSON.
+
+User request:
+"""
+
+LETTER_CSS = """
+@font-face{font-family:NotoTamil;src:url(NotoSansTamil-Regular.ttf)}
+@font-face{font-family:NotoLatin;src:url(NotoSans-Regular.ttf)}
+body{font-family:NotoLatin,NotoTamil;font-size:12pt;line-height:1.6}
+p{margin:0 0 12pt 0}
+p.b{text-align:justify;text-indent:30pt}
+p.r{text-align:right}
+"""
+
+
+def looks_like_letter_request(text):
+    t = (text or "").lower()
+    return any(k in t for k in LETTER_KEYWORDS)
+
+
+def parse_json(raw):
+    raw = (raw or "").strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    if start == -1 or end == -1:
+        raise ValueError("no JSON in reply")
+    return json.loads(raw[start:end + 1])
+
+
+def _e(s):
+    return htmllib.escape((s or "").strip())
+
+
+def _lines(s):
+    return _e(s).replace("\n", "<br>")
+
+
+def build_letter_html(d):
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y")
+    is_ta = d.get("language") == "ta"
+    lbl_from, lbl_to, lbl_date, lbl_sub = (
+        ("அனுப்புநர்", "பெறுநர்", "நாள்", "பொருள்") if is_ta
+        else ("From", "To", "Date", "Subject")
+    )
+    sender = _e(d.get("sender_name")) or BLANK
+    sender_addr = _lines(d.get("sender_address")) or BLANK
+    rec_title = _e(d.get("recipient_title")) or BLANK
+    rec_addr = _lines(d.get("recipient_address"))
+    date = _e(d.get("date")) or today
+    subject = _e(d.get("subject"))
+    salute = _e(d.get("salutation"))
+    closing = _e(d.get("closing"))
+    sign = _e(d.get("signature_name")) or sender
+
+    paras = "".join(
+        f"<p class='b'>{_lines(p)}</p>"
+        for p in (d.get("body") or "").split("\n\n") if p.strip()
+    )
+    to_block = rec_title + (f"<br>{rec_addr}" if rec_addr else "")
+
+    return f"""<body>
+<p><b>{lbl_from}:</b><br>{sender}<br>{sender_addr}</p>
+<p><b>{lbl_to}:</b><br>{to_block}</p>
+<p class='r'><b>{lbl_date}:</b> {date}</p>
+<p><b>{lbl_sub}:</b> {subject}</p>
+<p>{salute}</p>
+{paras}
+<p class='r'>{closing}<br><br><br>{sign}</p>
+</body>"""
+
+
+def build_letter_pdf(data, path):
+    story = fitz.Story(html=build_letter_html(data), user_css=LETTER_CSS,
+                       archive=fitz.Archive(FONT_DIR))
+    writer = fitz.DocumentWriter(path)
+    page = fitz.paper_rect("a4")
+    where = page + (60, 60, -60, -60)
+    more = 1
+    while more:
+        dev = writer.begin_page(page)
+        more, _ = story.place(where)
+        story.draw(dev)
+        writer.end_page()
+    writer.close()
+
+
+def try_letter(sender, user_text):
+    """Returns True if a letter PDF was created and sent, else False
+    (False means: carry on with the normal chat reply)."""
+    if not looks_like_letter_request(user_text):
+        return False
+
+    # Step 1: ask Gemini if this is really a document request. Any failure
+    # here just falls back to the normal reply, so old behaviour is safe.
+    try:
+        raw = ask_gemini(LETTER_PROMPT + user_text,
+                         system="Reply with JSON only.", clean=False)
+        data = parse_json(raw)
+    except Exception:
+        log.exception("letter intent check failed - using normal reply")
+        return False
+    if not data.get("wants_document"):
+        return False
+
+    # Step 2: build and send the PDF.
+    fd, path = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    try:
+        build_letter_pdf(data, path)
+        name = re.sub(r"[^A-Za-z0-9_-]+", "_", data.get("doc_type") or "letter")
+        send_document(sender, path, f"{name.strip('_') or 'letter'}.pdf")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+    if data.get("language") == "ta":
+        send_text(sender, "கடிதம் தயார். ____ இடங்களை நிரப்பவும்.")
+    else:
+        send_text(sender, "Your letter is ready. Fill in the ____ blanks.")
+    return True
+
 
 # ---------- MEDIA HANDLING ----------
 def handle_media(data, mime, fname, caption):
@@ -272,6 +440,9 @@ def process_message(sender, message, message_id):
         if kind == "text":
             user_text = message.get("text", {}).get("body", "").strip()
             if not user_text:
+                return
+            # NEW: letter / PDF creation (falls through to normal chat if not a letter)
+            if try_letter(sender, user_text):
                 return
             reply = ask_gemini(user_text)
 
