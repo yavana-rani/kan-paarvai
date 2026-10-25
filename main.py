@@ -22,7 +22,7 @@ from gtts import gTTS
 from google import genai
 from google.genai import types
 from docx import Document
-
+fonts/NotoSansTamil-Regular.ttf and fonts/NotoSans-Regular.ttf
 # ---------- CONFIG ----------
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
