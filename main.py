@@ -299,15 +299,20 @@ def build_letter_html(d):
 
 def build_letter_pdf(data, path):
     try:
-        # VERIFY fonts pa
-        tamil_font_path = Path(FONT_DIR) / "NotoSansTamil-Regular.ttf"
-        if not tamil_font_path.exists():
-            log.error(f"Font missing: {tamil_font_path} pa - Please verify pa")
-            # Fallback without archive pa - will use default font pa
-            story = fitz.Story(html=build_letter_html(data), user_css="body{font-size:12pt}")
-        else:
+        tamil_font = Path(FONT_DIR) / "NotoSansTamil-Regular.ttf"
+        latin_font = Path(FONT_DIR) / "NotoSans-Regular.ttf"
+        
+        log.info(f"Checking fonts: Tamil exists={tamil_font.exists()} pa, Latin exists={latin_font.exists()} pa")
+        
+        if tamil_font.exists() and latin_font.exists():
+            log.info(f"Using custom fonts from {FONT_DIR} pa")
             story = fitz.Story(html=build_letter_html(data), user_css=LETTER_CSS,
                                archive=fitz.Archive(FONT_DIR))
+        else:
+            log.warning(f"Fonts missing in {FONT_DIR}, using fallback without custom fonts pa")
+            # Fallback CSS without @font-face pa - PDF will still create pa!
+            fallback_css = "body{font-size:12pt;line-height:1.6} p{margin:0 0 12pt 0} p.b{text-align:justify;text-indent:30pt} p.r{text-align:right}"
+            story = fitz.Story(html=build_letter_html(data), user_css=fallback_css)
         
         writer = fitz.DocumentWriter(path)
         page = fitz.paper_rect("a4")
@@ -322,8 +327,8 @@ def build_letter_pdf(data, path):
         log.info(f"✅ PDF created at {path} pa")
     except Exception as e:
         log.exception(f"PDF failed pa: {e}")
-        raise  # Let caller handle pa
-
+        raise
+        
 def try_letter(sender, user_text):
     if not looks_like_letter_request(user_text):
         return False
