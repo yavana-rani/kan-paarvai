@@ -70,7 +70,17 @@ def already_processed(message_id):
         while len(_seen) > 5000:
             _seen.popitem(last=False)
     return False
-
+def make_maths_voice(text, lang="en"): # English la maths nalla varum pa
+    if any(s in text for s in ["a²","π","√","sin","cos","="]):
+        lang = "en" # Formula na English la pesavaikkalam pa
+    else:
+        lang = "ta" # Normal Tamil na Tamil la
+    
+    audio = BytesIO()
+    gTTS(text=tamil_math_to_speech(text), lang=lang).write_to_fp(audio)
+    audio.seek(0)
+    return audio
+    
 def make_tamil_voice_simple(text):
     text = re.sub(r"[*_#`]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
