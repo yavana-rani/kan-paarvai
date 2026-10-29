@@ -23,7 +23,7 @@ from google import genai
 from google.genai import types
 from docx import Document
 
-# ---------- CONFIG - CORRECTED PA ----------
+# ---------- CONFIG ----------
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
@@ -36,10 +36,10 @@ FALLBACK_MODELS = [m.strip() for m in os.getenv(
 ).split(",") if m.strip()]
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
 MAX_PDF_IMAGE_PAGES = 5
+MAX_VOICE_CHARS = 1200      # longer replies are cut at a sentence end
+MAX_VOICE_SEGMENTS = 10     # limit of Tamil/English pieces per voice note
 
-# Fonts folder - VERIFIED PA
 FONT_DIR = str(Path(__file__).resolve().parent / "fonts")
-# Create folder if not exists pa
 Path(FONT_DIR).mkdir(parents=True, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO)
@@ -53,12 +53,48 @@ SYSTEM_PROMPT = (
     "சுருக்கமாகவும் தெளிவாகவும் பதிலளிக்கவும்."
 )
 
+
 class UnsupportedFile(Exception):
     pass
+
+
+# ---------- FONTS (auto-download if missing) ----------
+FONT_FILES = {
+    "NotoSansTamil-Regular.ttf":
+        "https://github.com/notofonts/tamil/raw/main/fonts/NotoSansTamil/full/ttf/NotoSansTamil-Regular.ttf",
+    "NotoSans-Regular.ttf":
+        "https://github.com/notofonts/latin-greek-cyrillic/raw/main/fonts/NotoSans/full/ttf/NotoSans-Regular.ttf",
+}
+
+
+def ensure_fonts():
+    for name, url in FONT_FILES.items():
+        p = Path(FONT_DIR) / name
+        if p.exists() and p.stat().st_size > 10_000:
+            continue
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+            if r.content[:4] not in (b"\x00\x01\x00\x00", b"OTTO", b"true"):
+                raise ValueError("not a font file")
+            p.write_bytes(r.content)
+            log.info("Downloaded font %s", name)
+        except Exception as e:
+            log.error("Could not download %s: %s - put the file in %s manually",
+                      name, e, FONT_DIR)
+
+
+ensure_fonts()
+
+
+def fonts_ready():
+    return all((Path(FONT_DIR) / n).exists() for n in FONT_FILES)
+
 
 # ---------- DEDUPE ----------
 _seen = OrderedDict()
 _seen_lock = threading.Lock()
+
 
 def already_processed(message_id):
     if not message_id:
@@ -70,33 +106,8 @@ def already_processed(message_id):
         while len(_seen) > 5000:
             _seen.popitem(last=False)
     return False
-def make_maths_voice(text, lang="en"): # English la maths nalla varum pa
-    if any(s in text for s in ["a²","π","√","sin","cos","="]):
-        lang = "en" # Formula na English la pesavaikkalam pa
-    else:
-        lang = "ta" # Normal Tamil na Tamil la
-    
-    audio = BytesIO()
-    gTTS(text=tamil_math_to_speech(text), lang=lang).write_to_fp(audio)
-    audio.seek(0)
-    return audio
-    
-def make_tamil_voice_simple(text):
-    text = re.sub(r"[*_#`]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    
-    if not text:
-        return None
-        
-    audio = BytesIO()
-    gTTS(text=text, lang="ta", slow=False).write_to_fp(audio)
-    audio.seek(0)
-    return audio  # MP3 BytesIO pa
 
-# Usage in your WhatsApp bot:
-# if message starts with "voice:" 
-#   voice_file = make_tamil_voice_simple(message[6:])
-#   send_audio(voice_file)
+
 # ---------- TEXT CLEANING ----------
 def clean_text(text):
     if not text:
@@ -105,11 +116,9 @@ def clean_text(text):
     text = re.sub(r"[*`#]+", "", text)
     return text.strip()[:12000]
 
-def clean_voice_text(text):
-    return re.sub(r"\s+", " ", clean_text(text)).strip()
 
 # ---------- GEMINI WITH FALLBACK ----------
-def ask_gemini(contents, system=SYSTEM_PROMPT, clean=True):
+def ask_gemini(contents, system=SYSTEM_PROMPT, clean=True, json_mode=False):
     if not client:
         raise RuntimeError("GEMINI_API_KEY not set")
     unique = []
@@ -120,14 +129,14 @@ def ask_gemini(contents, system=SYSTEM_PROMPT, clean=True):
     for model_name in unique:
         try:
             log.info("Trying %s", model_name)
+            cfg = dict(system_instruction=system, temperature=0.2,
+                       max_output_tokens=4096)
+            if json_mode:
+                cfg["response_mime_type"] = "application/json"
             resp = client.models.generate_content(
                 model=model_name,
                 contents=contents,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    temperature=0.2,
-                    max_output_tokens=4096,
-                ),
+                config=types.GenerateContentConfig(**cfg),
             )
             text = getattr(resp, "text", None)
             if text:
@@ -138,9 +147,11 @@ def ask_gemini(contents, system=SYSTEM_PROMPT, clean=True):
             log.warning("%s failed: %s", model_name, e)
     raise RuntimeError(f"All Gemini models failed: {last_err}")
 
+
 # ---------- WHATSAPP API ----------
 def auth_headers():
     return {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+
 
 def graph_post(endpoint, payload):
     r = requests.post(
@@ -154,6 +165,7 @@ def graph_post(endpoint, payload):
     r.raise_for_status()
     return r.json()
 
+
 def send_text(to, text):
     graph_post("messages", {
         "messaging_product": "whatsapp",
@@ -162,11 +174,13 @@ def send_text(to, text):
         "text": {"body": clean_text(text)[:3900] or "..."},
     })
 
+
 def safe_send_text(to, text):
     try:
         send_text(to, text)
     except Exception:
         log.exception("could not send text")
+
 
 def upload_media(path, mime):
     with open(path, "rb") as f:
@@ -180,6 +194,7 @@ def upload_media(path, mime):
     r.raise_for_status()
     return r.json().get("id")
 
+
 def send_audio(to, path):
     mid = upload_media(path, "audio/mpeg")
     graph_post("messages", {
@@ -189,6 +204,7 @@ def send_audio(to, path):
         "audio": {"id": mid},
     })
 
+
 def send_document(to, path, filename="letter.pdf"):
     mid = upload_media(path, "application/pdf")
     graph_post("messages", {
@@ -197,6 +213,7 @@ def send_document(to, path, filename="letter.pdf"):
         "type": "document",
         "document": {"id": mid, "filename": filename},
     })
+
 
 def download_media(media_id):
     r = requests.get(f"{GRAPH}/{media_id}", headers=auth_headers(), timeout=30)
@@ -215,31 +232,119 @@ def download_media(media_id):
                 raise UnsupportedFile("too_big")
     return bytes(buf), mime
 
-def send_voice(to, text):
-    spoken = clean_voice_text(text)
-    if not spoken:
-        return
-    chunks = [spoken[i:i+350] for i in range(0, len(spoken), 350)]
-    chunks = chunks[:5]
-    for idx, chunk in enumerate(chunks):
-        path = None
-        try:
-            fd, path = tempfile.mkstemp(suffix=".mp3")
-            os.close(fd)
-            gTTS(text=chunk, lang="ta", slow=False).save(path)
-            send_audio(to, path)
-            log.info(f"Voice part {idx+1}/{len(chunks)} sent")
-        except Exception:
-            log.exception(f"voice part {idx+1} failed")
-        finally:
-            if path and os.path.exists(path):
-                os.remove(path)
 
-# ---------- LETTER / PDF CREATION - CORRECTED & VERIFIED PA ----------
+# ---------- VOICE (Tamil + English, proper pronunciation) ----------
+EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+")
+# runs of English words (letters/digits inside words) -> spoken with the English voice
+EN_RUN = re.compile(r"[A-Za-z][A-Za-z0-9'’\-]*(?:[ \t]+[A-Za-z][A-Za-z0-9'’\-]*)*")
+
+SYMBOL_WORDS = {
+    "=": " சமம் ",
+    "+": " கூட்டல் ",
+    "×": " பெருக்கல் ",
+    "÷": " வகுத்தல் ",
+    "%": " சதவீதம் ",
+    "√": " வர்க்கமூலம் ",
+    "π": " பை ",
+    "²": " வர்க்கம் ",
+    "³": " கனம் ",
+    "&": " மற்றும் ",
+}
+
+
+def speech_text(text):
+    """Turn a chat reply into text a TTS engine can read cleanly."""
+    t = clean_text(text)
+    t = re.sub(r"https?://\S+|www\.\S+", " ", t)           # links are not read
+    t = EMOJI_RE.sub(" ", t)                                 # emojis are not read
+    t = re.sub(r"(?<=\d),(?=\d{3}\b)", "", t)                # 1,000 -> 1000
+    t = re.sub(r"₹\s*(\d+(?:\.\d+)?)", r"\1 ரூபாய்", t)       # ₹500 -> 500 ரூபாய்
+    for sym, word in SYMBOL_WORDS.items():
+        t = t.replace(sym, word)
+    t = re.sub(r"^\s*[-•▪●]+\s*", "", t, flags=re.M)         # bullets
+    t = re.sub(r"[_~|<>\[\]{}\\^/]", " ", t)
+    t = re.sub(r"\s*\n+\s*", ". ", t)                        # line breaks -> pause
+    t = re.sub(r"([.!?])(\s*\.)+", r"\1", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _trim_sentence(text, limit):
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    idx = max(cut.rfind(c) for c in ".!?")
+    return cut[:idx + 1] if idx > limit * 0.5 else cut
+
+
+def _tts_bytes(text, lang):
+    buf = BytesIO()
+    gTTS(text=text, lang=lang, slow=False).write_to_fp(buf)
+    return buf.getvalue()
+
+
+def _split_segments(spoken):
+    segs, pos = [], 0
+    for m in EN_RUN.finditer(spoken):
+        if m.start() > pos:
+            segs.append(["ta", spoken[pos:m.start()]])
+        segs.append(["en", m.group()])
+        pos = m.end()
+    if pos < len(spoken):
+        segs.append(["ta", spoken[pos:]])
+    segs = [[l, s.strip()] for l, s in segs if re.search(r"\w", s)]
+    merged = []
+    for l, s in segs:
+        if merged and merged[-1][0] == l:
+            merged[-1][1] += " " + s
+        else:
+            merged.append([l, s])
+    return merged
+
+
+def synthesize_speech(text):
+    """Return MP3 bytes. Tamil parts use the Tamil voice, English parts the English voice."""
+    spoken = _trim_sentence(speech_text(text), MAX_VOICE_CHARS)
+    if not spoken:
+        return b""
+    segs = _split_segments(spoken)
+    if not segs:
+        return b""
+    if len(segs) > MAX_VOICE_SEGMENTS:
+        segs = [["ta", spoken]]
+    parts = []
+    for lang, seg in segs:
+        try:
+            parts.append(_tts_bytes(seg, lang))
+        except Exception:
+            log.exception("tts failed for %s segment", lang)
+    return b"".join(parts)
+
+
+def send_voice(to, text):
+    path = None
+    try:
+        audio = synthesize_speech(text)
+        if not audio:
+            return
+        fd, path = tempfile.mkstemp(suffix=".mp3")
+        with os.fdopen(fd, "wb") as f:
+            f.write(audio)
+        send_audio(to, path)
+        log.info("Voice sent")
+    except Exception:
+        log.exception("voice failed")
+    finally:
+        if path and os.path.exists(path):
+            os.remove(path)
+
+
+# ---------- LETTER / PDF CREATION ----------
 BLANK = "____________"
-LETTER_KEYWORDS = (
-    "letter", "application", "resume", "cv", "bonafide", "complaint",
-    "kadithum", "kaditham", "கடிதம்", "விடுப்பு", "விண்ணப்பம்", "pdf", "leave"
+LETTER_RE = re.compile(
+    r"\b(letter|application|resume|cv|bonafide|complaint|pdf|leave|kadit\w*)\b"
+    r"|கடிதம்|விடுப்பு|விண்ணப்பம்",
+    re.I,
 )
 
 LETTER_PROMPT = """You help write formal documents.
@@ -265,19 +370,28 @@ Rules:
 User request:
 """
 
-# VERIFIED CSS pa - quotes added pa
+# Tamil text uses the Tamil font; every run of ASCII (English, digits, punctuation)
+# is wrapped in <span class="en"> and uses the Latin font. This avoids missing glyphs.
 LETTER_CSS = """
 @font-face{font-family:NotoTamil;src:url('NotoSansTamil-Regular.ttf')}
 @font-face{font-family:NotoLatin;src:url('NotoSans-Regular.ttf')}
-body{font-family:NotoLatin,NotoTamil;font-size:12pt;line-height:1.6}
+body{font-family:NotoTamil;font-size:12pt;line-height:1.6}
+span.en{font-family:NotoLatin}
 p{margin:0 0 12pt 0}
 p.b{text-align:justify;text-indent:30pt}
 p.r{text-align:right}
 """
+FALLBACK_CSS = (
+    "body{font-size:12pt;line-height:1.6} p{margin:0 0 12pt 0} "
+    "p.b{text-align:justify;text-indent:30pt} p.r{text-align:right}"
+)
+
+_ASCII_SPLIT = re.compile(r"([\x20-\x7E]+)")
+
 
 def looks_like_letter_request(text):
-    t = (text or "").lower()
-    return any(k in t for k in LETTER_KEYWORDS)
+    return bool(LETTER_RE.search(text or ""))
+
 
 def parse_json(raw):
     raw = (raw or "").strip()
@@ -286,11 +400,20 @@ def parse_json(raw):
         raise ValueError("no JSON in reply")
     return json.loads(raw[start:end + 1])
 
-def _e(s):
-    return htmllib.escape((s or "").strip())
 
-def _lines(s):
-    return _e(s).replace("\n", "<br>")
+def _fmt(s):
+    """Escape, keep line breaks, and tag ASCII runs with the Latin font."""
+    out_lines = []
+    for line in (s or "").strip().split("\n"):
+        pieces = []
+        for piece in _ASCII_SPLIT.split(line):
+            if not piece:
+                continue
+            esc = htmllib.escape(piece)
+            pieces.append(f"<span class='en'>{esc}</span>" if _ASCII_SPLIT.fullmatch(piece) else esc)
+        out_lines.append("".join(pieces))
+    return "<br>".join(out_lines)
+
 
 def build_letter_html(d):
     today = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d/%m/%Y")
@@ -299,21 +422,21 @@ def build_letter_html(d):
         ("அனுப்புநர்", "பெறுநர்", "நாள்", "பொருள்") if is_ta
         else ("From", "To", "Date", "Subject")
     )
-    sender = _e(d.get("sender_name")) or BLANK
-    sender_addr = _lines(d.get("sender_address")) or BLANK
-    rec_title = _e(d.get("recipient_title")) or BLANK
-    rec_addr = _lines(d.get("recipient_address"))
-    date = _e(d.get("date")) or today
-    subject = _e(d.get("subject"))
-    salute = _e(d.get("salutation"))
-    closing = _e(d.get("closing"))
-    sign = _e(d.get("signature_name")) or sender
+    sender = _fmt(d.get("sender_name")) or BLANK
+    sender_addr = _fmt(d.get("sender_address")) or BLANK
+    rec_title = _fmt(d.get("recipient_title")) or BLANK
+    rec_addr = _fmt(d.get("recipient_address"))
+    date = _fmt(d.get("date")) or today
+    subject = _fmt(d.get("subject"))
+    salute = _fmt(d.get("salutation"))
+    closing = _fmt(d.get("closing"))
+    sign = _fmt(d.get("signature_name")) or sender
     paras = "".join(
-        f"<p class='b'>{_lines(p)}</p>"
+        f"<p class='b'>{_fmt(p)}</p>"
         for p in (d.get("body") or "").split("\n\n") if p.strip()
     )
     to_block = rec_title + (f"<br>{rec_addr}" if rec_addr else "")
-    return f"""<body>
+    return f"""<html><body>
 <p><b>{lbl_from}:</b><br>{sender}<br>{sender_addr}</p>
 <p><b>{lbl_to}:</b><br>{to_block}</p>
 <p class='r'><b>{lbl_date}:</b> {date}</p>
@@ -321,26 +444,23 @@ def build_letter_html(d):
 <p>{salute}</p>
 {paras}
 <p class='r'>{closing}<br><br><br>{sign}</p>
-</body>"""
+</body></html>"""
+
 
 def build_letter_pdf(data, path):
+    is_ta = data.get("language") == "ta"
+    if fonts_ready():
+        ensure_fonts()
+        story = fitz.Story(html=build_letter_html(data), user_css=LETTER_CSS,
+                           archive=fitz.Archive(FONT_DIR))
+    elif is_ta:
+        # Built-in PDF fonts have no Tamil glyphs -> would print empty boxes
+        raise RuntimeError(f"Tamil fonts missing in {FONT_DIR}")
+    else:
+        story = fitz.Story(html=build_letter_html(data), user_css=FALLBACK_CSS)
+
+    writer = fitz.DocumentWriter(path)
     try:
-        tamil_font = Path(FONT_DIR) / "NotoSansTamil-Regular.ttf"
-        latin_font = Path(FONT_DIR) / "NotoSans-Regular.ttf"
-        
-        log.info(f"Checking fonts: Tamil exists={tamil_font.exists()} pa, Latin exists={latin_font.exists()} pa")
-        
-        if tamil_font.exists() and latin_font.exists():
-            log.info(f"Using custom fonts from {FONT_DIR} pa")
-            story = fitz.Story(html=build_letter_html(data), user_css=LETTER_CSS,
-                               archive=fitz.Archive(FONT_DIR))
-        else:
-            log.warning(f"Fonts missing in {FONT_DIR}, using fallback without custom fonts pa")
-            # Fallback CSS without @font-face pa - PDF will still create pa!
-            fallback_css = "body{font-size:12pt;line-height:1.6} p{margin:0 0 12pt 0} p.b{text-align:justify;text-indent:30pt} p.r{text-align:right}"
-            story = fitz.Story(html=build_letter_html(data), user_css=fallback_css)
-        
-        writer = fitz.DocumentWriter(path)
         page = fitz.paper_rect("a4")
         where = page + (60, 60, -60, -60)
         more = 1
@@ -349,18 +469,17 @@ def build_letter_pdf(data, path):
             more, _ = story.place(where)
             story.draw(dev)
             writer.end_page()
+    finally:
         writer.close()
-        log.info(f"✅ PDF created at {path} pa")
-    except Exception as e:
-        log.exception(f"PDF failed pa: {e}")
-        raise
-        
+    log.info("PDF created at %s", path)
+
+
 def try_letter(sender, user_text):
     if not looks_like_letter_request(user_text):
         return False
     try:
         raw = ask_gemini(LETTER_PROMPT + user_text,
-                         system="Reply with JSON only.", clean=False)
+                         system="Reply with JSON only.", clean=False, json_mode=True)
         data = parse_json(raw)
     except Exception:
         log.exception("letter intent check failed - using normal reply")
@@ -374,11 +493,11 @@ def try_letter(sender, user_text):
         build_letter_pdf(data, path)
         name = re.sub(r"[^A-Za-z0-9_-]+", "_", data.get("doc_type") or "letter")
         send_document(sender, path, f"{name.strip('_') or 'letter'}.pdf")
-        log.info(f"✅ Letter PDF sent to {sender} pa")
-    except Exception as e:
-        log.exception(f"Failed to build/send PDF pa: {e}")
-        safe_send_text(sender, "PDF create panna mudiyala pa - font check pannunga pa. Please verify fonts folder pa")
-        return False
+        log.info("Letter PDF sent to %s", sender)
+    except Exception:
+        log.exception("Failed to build/send PDF")
+        safe_send_text(sender, "மன்னிக்கவும், PDF உருவாக்க முடியவில்லை. சிறிது நேரம் கழித்து முயற்சிக்கவும்.")
+        return True  # error already shown; do not also send a normal reply
     finally:
         if os.path.exists(path):
             os.remove(path)
@@ -389,7 +508,8 @@ def try_letter(sender, user_text):
         send_text(sender, "Your letter is ready. Fill in the ____ blanks.")
     return True
 
-# ---------- MEDIA HANDLING (same) ----------
+
+# ---------- MEDIA HANDLING ----------
 def handle_media(data, mime, fname, caption):
     mime = (mime or "").lower()
     name = (fname or "").lower()
@@ -426,6 +546,7 @@ def handle_media(data, mime, fname, caption):
         return ask_gemini(f"{caption or 'இந்த உரையை தமிழில் விளக்கவும்'}:\n{text[:12000]}")
     raise UnsupportedFile("type")
 
+
 # ---------- PROCESS ----------
 def process_message(sender, message, message_id):
     if already_processed(message_id):
@@ -461,6 +582,7 @@ def process_message(sender, message, message_id):
         log.exception("failed")
         safe_send_text(sender, "Konjam neram kalichu muyarchikavum pa")
 
+
 # ---------- ROUTES ----------
 def valid_signature(body: bytes, header: str) -> bool:
     if not META_APP_SECRET:
@@ -471,9 +593,11 @@ def valid_signature(body: bytes, header: str) -> bool:
     expected = hmac.new(META_APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, header.split("=", 1)[1])
 
+
 @app.api_route("/", methods=["GET", "HEAD"])
 def home():
     return {"status": "Kan Paarvai AI running pa"}
+
 
 @app.get("/webhook")
 def verify(request: Request):
@@ -481,6 +605,7 @@ def verify(request: Request):
     if VERIFY_TOKEN and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == VERIFY_TOKEN:
         return PlainTextResponse(q.get("hub.challenge", ""))
     return PlainTextResponse("fail", status_code=403)
+
 
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
