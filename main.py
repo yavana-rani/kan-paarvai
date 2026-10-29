@@ -71,6 +71,22 @@ def already_processed(message_id):
             _seen.popitem(last=False)
     return False
 
+def make_tamil_voice_simple(text):
+    text = re.sub(r"[*_#`]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    
+    if not text:
+        return None
+        
+    audio = BytesIO()
+    gTTS(text=text, lang="ta", slow=False).write_to_fp(audio)
+    audio.seek(0)
+    return audio  # MP3 BytesIO pa
+
+# Usage in your WhatsApp bot:
+# if message starts with "voice:" 
+#   voice_file = make_tamil_voice_simple(message[6:])
+#   send_audio(voice_file)
 # ---------- TEXT CLEANING ----------
 def clean_text(text):
     if not text:
