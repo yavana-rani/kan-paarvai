@@ -68,7 +68,25 @@ FONT_FILES = {
         "https://github.com/notofonts/latin-greek-cyrillic/raw/main/fonts/NotoSans/full/ttf/NotoSans-Regular.ttf",
 }
 
+# TTS ku anuppurathukku munnaadi idha pannunga
+def clean_formula_for_tts(text):
+    replacements = {
+        "(a + b)²": "A plus B whole square",
+        "(a + b)^2": "A plus B whole square",
+        "a² + 2ab + b²": "A square plus two A B plus B square",
+        "a^2 + 2ab + b^2": "A square plus two A B plus B square",
+        "=": " is equal to ",
+        "+": " plus "
+    }
+    for symbol, word in replacements.items():
+        text = text.replace(symbol, word)
+    return text
 
+# Example
+input_text = "(a + b)² = a² + 2ab + b²"
+tts_text = clean_formula_for_tts(input_text)
+print(tts_text) 
+# Output: "A plus B whole square is equal to A square plus two A B plus B square"
 def ensure_fonts():
     for name, url in FONT_FILES.items():
         p = Path(FONT_DIR) / name
