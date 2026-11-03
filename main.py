@@ -61,12 +61,65 @@ class UnsupportedFile(Exception):
 
 
 # ---------- FONTS (auto-download if missing) ----------
+# ---------- FONTS (auto-download if missing) ----------
+# FIX: replace the whole old "FONTS" section in main.py with this block.
+# The old URLs (notofonts/tamil/.../full/ttf/...) return 404, so the fonts were
+# never downloaded and every Tamil letter PDF failed.
+
 FONT_FILES = {
     "NotoSansTamil-Regular.ttf":
-        "https://github.com/notofonts/tamil/raw/main/fonts/NotoSansTamil/full/ttf/NotoSansTamil-Regular.ttf",
+        "https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/"
+        "fonts/NotoSansTamil/hinted/ttf/NotoSansTamil-Regular.ttf",
     "NotoSans-Regular.ttf":
-        "https://github.com/notofonts/latin-greek-cyrillic/raw/main/fonts/NotoSans/full/ttf/NotoSans-Regular.ttf",
+        "https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/"
+        "fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf",
 }
+
+
+def _font_ok(p):
+    # real font file, not an HTML error page or a Git LFS pointer
+    try:
+        return p.stat().st_size > 10_000 and p.read_bytes()[:4] in (
+            b"\x00\x01\x00\x00", b"OTTO", b"true")
+    except OSError:
+        return False
+
+
+def ensure_fonts():
+    for name, url in FONT_FILES.items():
+        p = Path(FONT_DIR) / name
+        if _font_ok(p):
+            continue
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+            if r.content[:4] not in (b"\x00\x01\x00\x00", b"OTTO", b"true"):
+                raise ValueError("not a font file")
+            p.write_bytes(r.content)
+            log.info("Downloaded font %s", name)
+        except Exception as e:
+            log.error("Could not download %s: %s - put the file in %s manually",
+                      name, e, FONT_DIR)
+
+
+ensure_fonts()
+
+
+def fonts_ready():
+    ok = all(_font_ok(Path(FONT_DIR) / n) for n in FONT_FILES)
+    if not ok:
+        log.error("Fonts missing in %s. Found: %s", FONT_DIR,
+                  [f.name for f in Path(FONT_DIR).glob("*")])
+    return ok
+
+
+# Optional: open https://<your-app>.onrender.com/fonts to check on Render
+@app.get("/fonts")
+def fonts_status():
+    return {"font_dir": FONT_DIR,
+            "files": {f.name: f.stat().st_size for f in Path(FONT_DIR).glob("*")},
+            "ready": fonts_ready()}
+
 
 # TTS ku anuppurathukku munnaadi idha pannunga
 def clean_formula_for_tts(text):
