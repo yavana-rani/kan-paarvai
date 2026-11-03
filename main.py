@@ -47,12 +47,14 @@ log = logging.getLogger("kan-paarvai")
 app = FastAPI(title="Kan Paarvai AI")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 GRAPH = f"https://graph.facebook.com/{GRAPH_VERSION}"
+
 SYSTEM_PROMPT = (
     "நீங்கள் Kan Paarvai AI. எப்போதும் எளிய தமிழில் (தமிழ் எழுத்துகளில்) "
     "சுருக்கமாகவும் தெளிவாகவும் பதிலளிக்கவும். "
     "கணித சூத்திரங்களை எளிய உரையில் எழுதவும், எ.கா. πr^2, a^2 + b^2 = c^2, "
     "x × y, a ÷ b; * பயன்படுத்த வேண்டாம்."
 )
+
 
 class UnsupportedFile(Exception):
     pass
@@ -66,41 +68,7 @@ FONT_FILES = {
         "https://github.com/notofonts/latin-greek-cyrillic/raw/main/fonts/NotoSans/full/ttf/NotoSans-Regular.ttf",
 }
 
-# ---- math -> spoken English ----
-_MATH_TOKEN = r"[A-Za-zπ√0-9()²³^]+(?:\.[0-9]+)?"
-_MATH_RE = re.compile(rf"{_MATH_TOKEN}(?:[ \t]*[=+×÷*/\-][ \t]*{_MATH_TOKEN})*")
-_MATH_STRONG = re.compile(r"[=+×÷*^²³√π]")
-_KEEP_WORDS = {"sin", "cos", "tan", "log", "ln", "sec", "cot", "cosec", "max", "min"}
 
-
-def _letters(m):
-    w = m.group()
-    if w.lower() in _KEEP_WORDS or len(w) > 3:
-        return w
-    return " ".join(w)          # "lb" -> "l b"
-
-
-def _math_to_english(expr):
-    e = re.sub(r"(?<=\d)(?=[A-Za-z])|(?<=[A-Za-z])(?=\d)", " ", expr)
-    e = re.sub(r"[A-Za-z]+", _letters, e)
-    e = re.sub(r"\^\s*2(?!\d)|²", " squared ", e)
-    e = re.sub(r"\^\s*3(?!\d)|³", " cubed ", e)
-    e = re.sub(r"\^\(?([A-Za-z0-9.]+)\)?", r" to the power \1 ", e)
-    for sym, word in {
-        "√": " square root of ", "π": " pi ", "=": " equals ",
-        "+": " plus ", "-": " minus ", "×": " times ", "*": " times ",
-        "÷": " divided by ", "/": " divided by ",
-        "(": " ", ")": " ",
-    }.items():
-        e = e.replace(sym, word)
-    return re.sub(r"\s+", " ", e).strip()
-
-
-def math_to_english(text):
-    def repl(m):
-        s = m.group()
-        return f" {_math_to_english(s)} " if _MATH_STRONG.search(s) else s
-    return _MATH_RE.sub(repl, text)
 def ensure_fonts():
     for name, url in FONT_FILES.items():
         p = Path(FONT_DIR) / name
@@ -269,8 +237,13 @@ def download_media(media_id):
 
 # ---------- VOICE (Tamil + English, proper pronunciation) ----------
 EMOJI_RE = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\uFE0F]+")
-# runs of English words (letters/digits inside words) -> spoken with the English voice
-EN_RUN = re.compile(r"[A-Za-z][A-Za-z0-9'’\-]*(?:[ \t]+[A-Za-z][A-Za-z0-9'’\-]*)*")
+
+# Runs of English words (numbers may join a run, but a run must contain a letter)
+# -> spoken with the English voice
+EN_RUN = re.compile(
+    r"(?=[A-Za-z0-9'’\- \t]*[A-Za-z])"
+    r"[A-Za-z0-9][A-Za-z0-9'’\-]*(?:[ \t]+[A-Za-z0-9][A-Za-z0-9'’\-]*)*"
+)
 
 SYMBOL_WORDS = {
     "=": " சமம் ",
@@ -285,6 +258,42 @@ SYMBOL_WORDS = {
     "&": " மற்றும் ",
 }
 
+# ---- math -> spoken English ----
+_MATH_TOKEN = r"[A-Za-zπ√0-9()²³^]+(?:\.[0-9]+)?"
+_MATH_RE = re.compile(rf"{_MATH_TOKEN}(?:[ \t]*[=+×÷*/\-][ \t]*{_MATH_TOKEN})*")
+_MATH_STRONG = re.compile(r"[=+×÷*^²³√π]")
+_KEEP_WORDS = {"sin", "cos", "tan", "log", "ln", "sec", "cot", "cosec", "max", "min"}
+
+
+def _letters(m):
+    w = m.group()
+    if w.lower() in _KEEP_WORDS or len(w) > 3:
+        return w
+    return " ".join(w)          # "lb" -> "l b"
+
+
+def _math_to_english(expr):
+    e = re.sub(r"(?<=\d)(?=[A-Za-z])|(?<=[A-Za-z])(?=\d)", " ", expr)
+    e = re.sub(r"[A-Za-z]+", _letters, e)
+    e = re.sub(r"\^\s*2(?!\d)|²", " squared ", e)
+    e = re.sub(r"\^\s*3(?!\d)|³", " cubed ", e)
+    e = re.sub(r"\^\(?([A-Za-z0-9.]+)\)?", r" to the power \1 ", e)
+    for sym, word in {
+        "√": " square root of ", "π": " pi ", "=": " equals ",
+        "+": " plus ", "-": " minus ", "×": " times ", "*": " times ",
+        "÷": " divided by ", "/": " divided by ",
+        "(": " ", ")": " ",
+    }.items():
+        e = e.replace(sym, word)
+    return re.sub(r"\s+", " ", e).strip()
+
+
+def math_to_english(text):
+    def repl(m):
+        s = m.group()
+        return f" {_math_to_english(s)} " if _MATH_STRONG.search(s) else s
+    return _MATH_RE.sub(repl, text)
+
 
 def speech_text(text):
     """Turn a chat reply into text a TTS engine can read cleanly."""
@@ -293,6 +302,7 @@ def speech_text(text):
     t = EMOJI_RE.sub(" ", t)                                 # emojis are not read
     t = re.sub(r"(?<=\d),(?=\d{3}\b)", "", t)                # 1,000 -> 1000
     t = re.sub(r"₹\s*(\d+(?:\.\d+)?)", r"\1 ரூபாய்", t)       # ₹500 -> 500 ரூபாய்
+    t = math_to_english(t)                                   # formulas -> spoken English
     for sym, word in SYMBOL_WORDS.items():
         t = t.replace(sym, word)
     t = re.sub(r"^\s*[-•▪●]+\s*", "", t, flags=re.M)         # bullets
