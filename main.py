@@ -101,26 +101,54 @@ def ensure_fonts():
 def fonts_ready(): return all(_font_ok(Path(FONT_DIR) / n) for n in FONT_FILES)
 
 _seen = OrderedDict(); _seen_lock = threading.Lock()
-def already_processed(message_id):
- if kind == "text":
-    user_text = message.get("text", {}).get("body", "").strip()
-    if not user_text: return
-    
-    # --- NEW: Direct image keyword detection (don't trust Gemini for this) ---
-    lower = user_text.lower()
-    image_keywords = ["generate image", "create image", "diwali image", "poster", "logo", "greeting", "wish image", "image kudu", "padam", "image venum"]
-    if any(k in lower for k in image_keywords):
-        # Directly generate, don't ask Gemini for JSON
-        send_text(sender, "Image generate pannuren pa, konjam wait pannunga pa... 🎨")
-        # English prompt for generation
-        img_prompt = user_text.replace("Generate","").replace("generate","") + ", beautiful Diwali festival, oil lamps, rangoli, colorful, 4k, festive"
-        img_bytes = generate_image_bytes(img_prompt, "en")
-        if img_bytes:
-            send_image(sender, img_bytes, caption="Ungal Diwali valthu image ready pa! 🪔 Happy Diwali!")
-            send_voice(sender, "Ungal Diwali valthu image ready pa! Happy Diwali!", "ta")
-        else:
-            safe_send_text(sender, MSG["img_fail"])
-        return
+
+def generate_image_bytes(prompt, lang_code="ta"):
+    # No Gemini image model needed - direct free API, 100% works
+    import requests
+    full_prompt = f"{prompt}, beautiful Diwali festival, oil lamps, rangoli, colorful, 4k, festive, no text"
+    try:
+        # This API works always, no key needed
+        url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(full_prompt)}?width=1024&height=1024&nologo=true&model=flux"
+        r = requests.get(url, timeout=45)
+        r.raise_for_status()
+        return r.content
+    except Exception as e:
+        print(f"Image gen failed: {e}")
+        return None
+
+def send_image(to, image_bytes, caption=""):
+    import tempfile, os
+    fd, path = tempfile.mkstemp(suffix=".jpg")
+    try:
+        os.close(fd)
+        with open(path,"wb") as f: f.write(image_bytes)
+        mid = upload_media(path,"image/jpeg")
+        graph_post("messages", {
+            "messaging_product":"whatsapp","to":to,"type":"image",
+            "image":{"id":mid,"caption":caption[:900] if caption else ""}
+        })
+    finally:
+        if os.path.exists(path): os.remove(path)
+
+ def process_message(sender, message, message_id):
+    if already_processed(message_id): return
+    kind = message.get("type","")
+    try:
+        if kind == "text":
+            user_text = message.get("text",{}).get("body","").strip()
+            lower = user_text.lower()
+            # FORCE IMAGE - Don't ask Gemini
+            if "image" in lower or "generate" in lower and "diwali" in lower or "poster" in lower or "logo" in lower:
+                send_text(sender, "Image generate pannuren pa... 🎨 10 sec wait pannunga pa")
+                img_bytes = generate_image_bytes(user_text, "ta")
+                if img_bytes:
+                    send_image(sender, img_bytes, "Ungal Diwali image ready pa! 🪔✨")
+                    send_voice(sender, "Ungal Diwali image ready pa!", "ta")
+                else:
+                    safe_send_text(sender, "Image failed pa, try again pa")
+                return
+            # Normal flow continues...
+            result, lang = ask_with_lang(TEXT_PROMPT + user_text, "Reply with JSON only.")
     # --- END NEW ---
     
     result, lang = ask_with_lang(TEXT_PROMPT + user_text, "Reply with JSON only.")
