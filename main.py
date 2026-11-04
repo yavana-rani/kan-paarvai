@@ -310,15 +310,20 @@ def generate_image_bytes(prompt, lang_code="ta"):
     full_prompt = prompt
     if "diwali" in prompt.lower():
         full_prompt += ", beautiful Diwali festival, oil lamps, rangoli, colorful, 4k, festive, no text"
-    try:
-        url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(full_prompt)}?width=1024&height=1024&nologo=true&model=flux"
-        r = requests.get(url, timeout=45)
-        r.raise_for_status()
-        if not r.headers.get("Content-Type", "").startswith("image"): raise ValueError("not an image")
-        return r.content
-    except Exception as e:
-        log.error(f"Image gen failed: {e}")
-        return None
+    q = requests.utils.quote(full_prompt)
+    urls = [
+        f"https://image.pollinations.ai/prompt/{q}?width=1024&height=1024&nologo=true&model=flux",
+        f"https://image.pollinations.ai/prompt/{q}?width=768&height=768&nologo=true",
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=60)
+            if r.ok and r.headers.get("Content-Type", "").startswith("image"):
+                return r.content
+            log.error(f"Image gen HTTP {r.status_code}: {r.text[:200]}")
+        except Exception as e:
+            log.error(f"Image gen failed: {e}")
+    return None
 
 IMAGE_NOUNS = ("image", "picture", "photo", "poster", "logo", "greeting card")
 IMAGE_VERBS = ("generate", "create", "draw", "make", "design", "venum", "vendum")
@@ -449,6 +454,21 @@ def send_letter(sender, result, lang):
 
 
 # ---------- MESSAGE HANDLING ----------
+def route_result(sender, result, lang, user_text=""):
+    """Shared by text and voice: chat / image / document."""
+    kind = result.get("kind", "chat")
+    if kind == "image":
+        ack = (result.get("reply") or "").strip()
+        if ack: send_text(sender, ack)
+        prompt = result.get("image_prompt") or user_text or "a beautiful colorful festive picture"
+        img_bytes = generate_image_bytes(prompt, lang)
+        if img_bytes: send_image(sender, img_bytes, "✨")
+        else: safe_send_text(sender, MSG["img_fail"])
+    elif kind == "document":
+        send_letter(sender, result, lang)
+    else:
+        send_reply(sender, result.get("reply") or "", lang)
+
 def handle_text(sender, message):
     user_text = message.get("text", {}).get("body", "").strip()
     if not user_text: return
@@ -464,27 +484,15 @@ def handle_text(sender, message):
         return
 
     result, lang = ask_with_lang(TEXT_PROMPT + user_text, SYSTEM_PROMPT + " Reply with JSON only.")
-    kind = result.get("kind", "chat")
-    if kind == "image":
-        ack = (result.get("reply") or "").strip()
-        if ack: send_text(sender, ack)
-        img_bytes = generate_image_bytes(result.get("image_prompt") or user_text, lang)
-        if img_bytes: send_image(sender, img_bytes, "✨")
-        else: safe_send_text(sender, MSG["img_fail"])
-    elif kind == "document":
-        send_letter(sender, result, lang)
-    else:
-        send_reply(sender, result.get("reply") or "", lang)
+    route_result(sender, result, lang, user_text)
 
 def handle_audio(sender, message):
     data, mime = download_media(message["audio"]["id"])
- if mime.startswith("audio/"):
-    clean_mime = mime.split(";")[0].strip()
-    part = types.Part.from_bytes(data=data, mime_type=clean_mime)
-    contents = [caption or "Listen to this voice message and answer it. If user asks for image generation, reply with word IMAGE_REQUEST", part]
     part = types.Part.from_bytes(data=data, mime_type=mime or "audio/ogg")
-    result, lang = ask_with_lang([part, "Answer the speaker."], VOICE_PROMPT)
-    send_reply(sender, result.get("reply") or "", lang)
+    result, lang = ask_with_lang(
+        [part, TEXT_PROMPT + "(The user's message is in the attached audio. Listen to it and follow it.)"],
+        SYSTEM_PROMPT + " Reply with JSON only.")
+    route_result(sender, result, lang)
 
 def handle_image(sender, message):
     media = message["image"]
