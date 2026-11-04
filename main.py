@@ -55,6 +55,7 @@ SYSTEM_PROMPT = f"You are Kan Paarvai AI, a helpful WhatsApp assistant. Always r
 # Updated prompt with image support
 TEXT_PROMPT = """Read the user's message and reply with ONLY one JSON object, no markdown fences:
 {
+You ARE ABLE to generate images. NEVER say "I cannot generate images". If user asks for image, you MUST return kind="image".
  "language": "", "kind": "chat" or "document" or "image", "reply": "", "image_prompt": "",
  "doc_type": "", "sender_name": "", "sender_address": "", "recipient_title": "", "recipient_address": "",
  "date": "", "subject": "", "salutation": "", "body": "", "closing": "", "signature_name": "",
@@ -101,6 +102,29 @@ def fonts_ready(): return all(_font_ok(Path(FONT_DIR) / n) for n in FONT_FILES)
 
 _seen = OrderedDict(); _seen_lock = threading.Lock()
 def already_processed(message_id):
+ if kind == "text":
+    user_text = message.get("text", {}).get("body", "").strip()
+    if not user_text: return
+    
+    # --- NEW: Direct image keyword detection (don't trust Gemini for this) ---
+    lower = user_text.lower()
+    image_keywords = ["generate image", "create image", "diwali image", "poster", "logo", "greeting", "wish image", "image kudu", "padam", "image venum"]
+    if any(k in lower for k in image_keywords):
+        # Directly generate, don't ask Gemini for JSON
+        send_text(sender, "Image generate pannuren pa, konjam wait pannunga pa... 🎨")
+        # English prompt for generation
+        img_prompt = user_text.replace("Generate","").replace("generate","") + ", beautiful Diwali festival, oil lamps, rangoli, colorful, 4k, festive"
+        img_bytes = generate_image_bytes(img_prompt, "en")
+        if img_bytes:
+            send_image(sender, img_bytes, caption="Ungal Diwali valthu image ready pa! 🪔 Happy Diwali!")
+            send_voice(sender, "Ungal Diwali valthu image ready pa! Happy Diwali!", "ta")
+        else:
+            safe_send_text(sender, MSG["img_fail"])
+        return
+    # --- END NEW ---
+    
+    result, lang = ask_with_lang(TEXT_PROMPT + user_text, "Reply with JSON only.")
+    # ... rest of your code
     if not message_id: return False
     with _seen_lock:
         if message_id in _seen: return True
