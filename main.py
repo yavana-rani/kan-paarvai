@@ -478,6 +478,10 @@ def handle_text(sender, message):
 
 def handle_audio(sender, message):
     data, mime = download_media(message["audio"]["id"])
+ if mime.startswith("audio/"):
+    clean_mime = mime.split(";")[0].strip()
+    part = types.Part.from_bytes(data=data, mime_type=clean_mime)
+    contents = [caption or "Listen to this voice message and answer it. If user asks for image generation, reply with word IMAGE_REQUEST", part]
     part = types.Part.from_bytes(data=data, mime_type=mime or "audio/ogg")
     result, lang = ask_with_lang([part, "Answer the speaker."], VOICE_PROMPT)
     send_reply(sender, result.get("reply") or "", lang)
