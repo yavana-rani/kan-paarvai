@@ -15,8 +15,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
-import fitz
-from PIL import Image
+import fitz  # PyMuPDF
+from PIL import Image, ImageOps
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 from gtts import gTTS
@@ -38,6 +38,7 @@ DEFAULT_LANG = os.getenv("DEFAULT_LANG", "ta")
 LOCAL_TZ = os.getenv("LOCAL_TZ", "Asia/Kolkata")
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
 MAX_PDF_IMAGE_PAGES = 5
+MAX_PDF_TEXT_CHARS = 15000
 MAX_VOICE_CHARS = 1200
 MAX_VOICE_SEGMENTS = 10
 FONT_DIR = str(Path(__file__).resolve().parent / "fonts")
@@ -50,25 +51,38 @@ client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 GRAPH = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
 STYLE_RULES = "Keep answers short, simple and clear. Write math formulas as plain text, e.g. πr^2, a^2 + b^2 = c^2, x × y, a ÷ b; do not use * or markdown."
+LANG_HINT = ' "language" is the ISO 639-1 code of your reply (e.g. ta, en, hi).'
 SYSTEM_PROMPT = f"You are Kan Paarvai AI, a helpful WhatsApp assistant. Always reply in the SAME language the user used. If there is no user text, reply in language code '{DEFAULT_LANG}'. " + STYLE_RULES
 
-# Updated prompt with image support
-TEXT_PROMPT = """Read the user's message and reply with ONLY one JSON object, no markdown fences:
+TEXT_PROMPT = """You ARE ABLE to generate images. NEVER say "I cannot generate images". If user asks for an image, you MUST return kind="image".
+Read the user's message and reply with ONLY one JSON object, no markdown fences:
 {
-You ARE ABLE to generate images. NEVER say "I cannot generate images". If user asks for image, you MUST return kind="image".
  "language": "", "kind": "chat" or "document" or "image", "reply": "", "image_prompt": "",
  "doc_type": "", "sender_name": "", "sender_address": "", "recipient_title": "", "recipient_address": "",
  "date": "", "subject": "", "salutation": "", "body": "", "closing": "", "signature_name": "",
  "labels": {"from": "", "to": "", "date": "", "subject": ""}, "ready_message": ""
 }
 Rules:
+- "language" is the ISO 639-1 code of the user's language (e.g. ta, en, hi).
 - kind is "image" if user asks to create, generate, draw an image, picture, photo, logo, poster, greeting card.
 - For "image": put detailed ENGLISH prompt in "image_prompt" and acknowledgement in "reply" in user's language.
 - For "document": fill document fields.
 - For "chat": put answer in "reply".
 """ + STYLE_RULES + "\n\nUser message:\n"
 
-MEDIA_PROMPT = """Reply with ONLY one JSON object: {"language": "", "reply": ""} Answer in caption language, otherwise '""" + DEFAULT_LANG + """'. """ + STYLE_RULES
+MEDIA_PROMPT = """Reply with ONLY one JSON object: {"language": "", "reply": ""} Answer in caption language, otherwise '""" + DEFAULT_LANG + """'. """ + STYLE_RULES + LANG_HINT + " "
+
+VOICE_PROMPT = 'Reply with ONLY one JSON object: {"language": "", "reply": ""} Listen to the audio and answer it in the same language the speaker used. ' + STYLE_RULES + LANG_HINT
+
+IMAGE_PROMPT = MEDIA_PROMPT + (
+    "Task: look at the image and explain in 3-5 short lines what is in it: the main subject, "
+    "important details, and any visible text (read it briefly). If the caption asks a question, answer it instead."
+)
+
+DOC_PROMPT = MEDIA_PROMPT + (
+    "Task: explain in 4-6 short lines what this document contains: what kind of document it is, "
+    "the main topics, and the key points or numbers. If the caption asks a question, answer it too."
+)
 
 MSG = {
     "retry": "Please try again in a little while 🙏 (Konjam neram kalichu muyarchikavum pa)",
@@ -79,7 +93,15 @@ MSG = {
     "img_fail": "Sorry, image could not be created. Please try again later (Image create panna mudiyala pa)",
 }
 
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
 class UnsupportedFile(Exception): pass
+class TooBig(Exception): pass
+class EmptyFile(Exception): pass
+
+
+# ---------- FONTS ----------
 FONT_FILES = {
     "NotoSansTamil-Regular.ttf": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoSansTamil/hinted/ttf/NotoSansTamil-Regular.ttf",
     "NotoSans-Regular.ttf": "https://raw.githubusercontent.com/notofonts/notofonts.github.io/main/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf",
@@ -100,59 +122,11 @@ def ensure_fonts():
         except Exception as e: log.warning(f"Could not download {name}: {e}")
 def fonts_ready(): return all(_font_ok(Path(FONT_DIR) / n) for n in FONT_FILES)
 
+threading.Thread(target=ensure_fonts, daemon=True).start()
+
 _seen = OrderedDict(); _seen_lock = threading.Lock()
 
-def generate_image_bytes(prompt, lang_code="ta"):
-    # No Gemini image model needed - direct free API, 100% works
-    import requests
-    full_prompt = f"{prompt}, beautiful Diwali festival, oil lamps, rangoli, colorful, 4k, festive, no text"
-    try:
-        # This API works always, no key needed
-        url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(full_prompt)}?width=1024&height=1024&nologo=true&model=flux"
-        r = requests.get(url, timeout=45)
-        r.raise_for_status()
-        return r.content
-    except Exception as e:
-        print(f"Image gen failed: {e}")
-        return None
-
-def send_image(to, image_bytes, caption=""):
-    import tempfile, os
-    fd, path = tempfile.mkstemp(suffix=".jpg")
-    try:
-        os.close(fd)
-        with open(path,"wb") as f: f.write(image_bytes)
-        mid = upload_media(path,"image/jpeg")
-        graph_post("messages", {
-            "messaging_product":"whatsapp","to":to,"type":"image",
-            "image":{"id":mid,"caption":caption[:900] if caption else ""}
-        })
-    finally:
-        if os.path.exists(path): os.remove(path)
-
- def process_message(sender, message, message_id):
-    if already_processed(message_id): return
-    kind = message.get("type","")
-    try:
-        if kind == "text":
-            user_text = message.get("text",{}).get("body","").strip()
-            lower = user_text.lower()
-            # FORCE IMAGE - Don't ask Gemini
-            if "image" in lower or "generate" in lower and "diwali" in lower or "poster" in lower or "logo" in lower:
-                send_text(sender, "Image generate pannuren pa... 🎨 10 sec wait pannunga pa")
-                img_bytes = generate_image_bytes(user_text, "ta")
-                if img_bytes:
-                    send_image(sender, img_bytes, "Ungal Diwali image ready pa! 🪔✨")
-                    send_voice(sender, "Ungal Diwali image ready pa!", "ta")
-                else:
-                    safe_send_text(sender, "Image failed pa, try again pa")
-                return
-            # Normal flow continues...
-            result, lang = ask_with_lang(TEXT_PROMPT + user_text, "Reply with JSON only.")
-    # --- END NEW ---
-    
-    result, lang = ask_with_lang(TEXT_PROMPT + user_text, "Reply with JSON only.")
-    # ... rest of your code
+def already_processed(message_id):
     if not message_id: return False
     with _seen_lock:
         if message_id in _seen: return True
@@ -160,13 +134,14 @@ def send_image(to, image_bytes, caption=""):
         while len(_seen) > 5000: _seen.popitem(last=False)
     return False
 
+
+# ---------- TEXT / LANGUAGE HELPERS ----------
 def clean_text(text):
     if not text: return ""
     text = re.sub(r"```.*?```", " ", text, flags=re.S)
     text = re.sub(r"[*`#]+", "", text)
     return text.strip()[:12000]
 
-# ---- Language detect helpers (same as yours) ----
 _SCRIPT_LANG = [("TAMIL","ta"),("DEVANAGARI","hi"),("TELUGU","te"),("MALAYALAM","ml"),("KANNADA","kn"),("BENGALI","bn"),("ARABIC","ar")]
 def _script_of(ch):
     try: name = unicodedata.name(ch)
@@ -187,7 +162,8 @@ def is_latin_text(text): return not any(c.isalpha() and _script_of(c) not in (No
 RTL_LANGS = {"ar","fa","ur","he","iw"}
 def base_lang(code): return (code or "").strip().lower().replace("_","-").split("-")[0]
 
-# ---- Gemini ----
+
+# ---------- GEMINI ----------
 def ask_gemini(contents, system=SYSTEM_PROMPT, clean=True, json_mode=False):
     if not client: raise RuntimeError("GEMINI_API_KEY not set")
     unique = []
@@ -213,19 +189,364 @@ def ask_with_lang(contents, system):
     try:
         data = parse_json(ask_gemini(contents, system=system, clean=False, json_mode=True))
         lang = (data.get("language") or "").strip()
+        if len(base_lang(lang)) not in (2, 3): lang = ""
         if data.get("kind") not in ("document",):
             data["reply"] = clean_text(data.get("reply")) if data.get("reply") else data.get("reply")
-        lang = lang or guess_lang(data.get("reply") or data.get("image_prompt") or "")
+        lang = lang or guess_lang(data.get("reply") or data.get("image_prompt") or data.get("body") or "")
         return data, (lang or DEFAULT_LANG)
     except Exception:
         reply = ask_gemini(contents)
         return {"kind":"chat","reply":reply}, guess_lang(reply)
 
-# ---- WhatsApp ----
+
+# ---------- WHATSAPP API ----------
 def auth_headers(): return {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+
 def graph_post(endpoint, payload):
     r = requests.post(f"{GRAPH}/{PHONE_NUMBER_ID}/{endpoint}", headers={**auth_headers(),"Content-Type":"application/json"}, json=payload, timeout=40)
     if not r.ok: log.error(f"Graph error {r.status_code}: {r.text}")
     r.raise_for_status(); return r.json()
+
 def send_text(to, text):
-    graph_post("messages", {"messaging_product":"whatsapp","to":to,"type":"
+    text = (text or "").strip() or MSG["retry"]
+    for i in range(0, len(text), 4000):
+        graph_post("messages", {"messaging_product":"whatsapp","to":to,"type":"text",
+                                "text":{"body":text[i:i+4000],"preview_url":False}})
+
+def safe_send_text(to, text):
+    try: send_text(to, text)
+    except Exception as e: log.error(f"send_text failed: {e}")
+
+def upload_media(path, mime):
+    with open(path, "rb") as f:
+        r = requests.post(f"{GRAPH}/{PHONE_NUMBER_ID}/media", headers=auth_headers(),
+                          data={"messaging_product":"whatsapp","type":mime},
+                          files={"file":(os.path.basename(path), f, mime)}, timeout=90)
+    if not r.ok: log.error(f"Upload error {r.status_code}: {r.text}")
+    r.raise_for_status(); return r.json()["id"]
+
+def download_media(media_id):
+    meta = requests.get(f"{GRAPH}/{media_id}", headers=auth_headers(), timeout=30)
+    meta.raise_for_status(); info = meta.json()
+    if int(info.get("file_size") or 0) > MAX_MEDIA_BYTES: raise TooBig()
+    r = requests.get(info["url"], headers=auth_headers(), timeout=60, stream=True)
+    r.raise_for_status()
+    buf = BytesIO()
+    for chunk in r.iter_content(65536):
+        buf.write(chunk)
+        if buf.tell() > MAX_MEDIA_BYTES: raise TooBig()
+    mime = (info.get("mime_type") or r.headers.get("Content-Type","")).split(";")[0].strip()
+    return buf.getvalue(), mime
+
+def send_image(to, image_bytes, caption=""):
+    fd, path = tempfile.mkstemp(suffix=".jpg")
+    try:
+        os.close(fd)
+        with open(path, "wb") as f: f.write(image_bytes)
+        mid = upload_media(path, "image/jpeg")
+        graph_post("messages", {
+            "messaging_product":"whatsapp","to":to,"type":"image",
+            "image":{"id":mid,"caption":caption[:900] if caption else ""}
+        })
+    finally:
+        if os.path.exists(path): os.remove(path)
+
+def send_document(to, path, filename, caption=""):
+    mid = upload_media(path, "application/pdf")
+    graph_post("messages", {
+        "messaging_product":"whatsapp","to":to,"type":"document",
+        "document":{"id":mid,"filename":filename,"caption":caption[:900] if caption else ""}
+    })
+
+
+# ---------- VOICE ----------
+TTS_LANGS = tts_langs()
+_EMOJI = re.compile("[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f]")
+
+def _voice_lang(lang, text):
+    code = base_lang(lang)
+    if code == "iw": code = "he"
+    if code != "en" and is_latin_text(text): code = "en"   # Tanglish etc. reads better with English voice
+    return code if code in TTS_LANGS else "en"
+
+def _voice_chunks(text, size=200):
+    sentences = re.split(r"(?<=[.!?।])\s+", text)
+    chunks, cur = [], ""
+    for s in sentences:
+        while len(s) > size:
+            if cur: chunks.append(cur); cur = ""
+            chunks.append(s[:size]); s = s[size:]
+        if len(cur) + len(s) + 1 > size and cur: chunks.append(cur); cur = s
+        else: cur = f"{cur} {s}".strip()
+    if cur: chunks.append(cur)
+    return chunks[:MAX_VOICE_SEGMENTS]
+
+def send_voice(to, text, lang):
+    text = _EMOJI.sub("", clean_text(text))[:MAX_VOICE_CHARS].strip()
+    if not text: return
+    vlang = _voice_lang(lang, text)
+    audio = BytesIO()
+    for chunk in _voice_chunks(text):
+        gTTS(text=chunk, lang=vlang).write_to_fp(audio)
+    fd, path = tempfile.mkstemp(suffix=".mp3")
+    try:
+        os.close(fd)
+        with open(path, "wb") as f: f.write(audio.getvalue())
+        mid = upload_media(path, "audio/mpeg")
+        graph_post("messages", {"messaging_product":"whatsapp","to":to,"type":"audio","audio":{"id":mid}})
+    finally:
+        if os.path.exists(path): os.remove(path)
+
+def send_reply(to, text, lang):
+    """Text first, then a voice copy. Voice failure never blocks the text."""
+    text = (text or "").strip() or MSG["retry"]
+    send_text(to, text)
+    try: send_voice(to, text, lang)
+    except Exception as e: log.warning(f"voice failed: {e}")
+
+
+# ---------- IMAGE GENERATION ----------
+def generate_image_bytes(prompt, lang_code="ta"):
+    full_prompt = prompt
+    if "diwali" in prompt.lower():
+        full_prompt += ", beautiful Diwali festival, oil lamps, rangoli, colorful, 4k, festive, no text"
+    try:
+        url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(full_prompt)}?width=1024&height=1024&nologo=true&model=flux"
+        r = requests.get(url, timeout=45)
+        r.raise_for_status()
+        if not r.headers.get("Content-Type", "").startswith("image"): raise ValueError("not an image")
+        return r.content
+    except Exception as e:
+        log.error(f"Image gen failed: {e}")
+        return None
+
+IMAGE_NOUNS = ("image", "picture", "photo", "poster", "logo", "greeting card")
+IMAGE_VERBS = ("generate", "create", "draw", "make", "design", "venum", "vendum")
+
+def wants_image(lower):
+    return (any(n in lower for n in IMAGE_NOUNS) and any(v in lower for v in IMAGE_VERBS)) \
+        or ("generate" in lower and "diwali" in lower)
+
+
+# ---------- READ IMAGE ----------
+def prepare_image(data):
+    try:
+        img = ImageOps.exif_transpose(Image.open(BytesIO(data)))
+        img.thumbnail((1600, 1600))
+        if img.mode != "RGB": img = img.convert("RGB")
+        out = BytesIO(); img.save(out, "JPEG", quality=85)
+        return out.getvalue()
+    except Exception as e:
+        raise UnsupportedFile(f"bad image: {e}")
+
+def explain_image(sender, data, caption):
+    jpeg = prepare_image(data)
+    part = types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")
+    result, lang = ask_with_lang([part, f"Caption: {caption}" if caption else "No caption."], IMAGE_PROMPT)
+    send_reply(sender, result.get("reply") or MSG["retry"], lang)
+
+
+# ---------- READ PDF / WORD ----------
+def read_pdf(data):
+    """Returns (page_count, text, image_parts). Scanned PDFs fall back to page images."""
+    doc = fitz.open(stream=data, filetype="pdf")
+    try:
+        if doc.needs_pass: raise EmptyFile()
+        pages = doc.page_count
+        text = "\n".join(p.get_text() for p in doc).strip()
+        if len(re.sub(r"\s+", "", text)) >= 50:
+            return pages, text[:MAX_PDF_TEXT_CHARS], []
+        parts = []
+        for i in range(min(pages, MAX_PDF_IMAGE_PAGES)):
+            pix = doc[i].get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+            parts.append(types.Part.from_bytes(data=pix.tobytes("jpeg"), mime_type="image/jpeg"))
+        if not parts: raise EmptyFile()
+        return pages, "", parts
+    finally:
+        doc.close()
+
+def read_docx(data):
+    d = Document(BytesIO(data))
+    lines = [p.text.strip() for p in d.paragraphs if p.text.strip()]
+    for t in d.tables:
+        for row in t.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells: lines.append(" | ".join(cells))
+    text = "\n".join(lines).strip()
+    if not text: raise EmptyFile()
+    return text[:MAX_PDF_TEXT_CHARS]
+
+def explain_pdf(sender, data, filename, caption):
+    pages, text, image_parts = read_pdf(data)
+    contents = image_parts if image_parts else [f"Document text:\n{text}"]
+    contents = list(contents) + [f"Caption: {caption}" if caption else "No caption."]
+    result, lang = ask_with_lang(contents, DOC_PROMPT)
+    header = f"📄 {filename} ({pages} page{'s' if pages != 1 else ''})"
+    send_reply(sender, f"{header}\n\n{result.get('reply') or MSG['retry']}", lang)
+
+def explain_docx(sender, data, filename, caption):
+    text = read_docx(data)
+    result, lang = ask_with_lang([f"Document text:\n{text}", f"Caption: {caption}" if caption else "No caption."], DOC_PROMPT)
+    send_reply(sender, f"📝 {filename}\n\n{result.get('reply') or MSG['retry']}", lang)
+
+
+# ---------- CREATE LETTER PDF ----------
+def build_letter_pdf(d, lang):
+    if not fonts_ready(): ensure_fonts()
+    lab = d.get("labels") or {}
+    esc = lambda s: htmllib.escape(str(s or "")).replace("\n", "<br>")
+    def block(label, *lines):
+        lines = [esc(l) for l in lines if l]
+        if not lines: return ""
+        head = f"<b>{esc(label)}</b><br>" if label else ""
+        return f"<p>{head}{'<br>'.join(lines)}</p>"
+    date = d.get("date") or datetime.now(ZoneInfo(LOCAL_TZ)).strftime("%d-%m-%Y")
+    rtl = base_lang(lang) in RTL_LANGS
+    body_html = "".join([
+        block(lab.get("date"), date),
+        block(lab.get("from"), d.get("sender_name"), d.get("sender_address")),
+        block(lab.get("to"), d.get("recipient_title"), d.get("recipient_address")),
+        f"<p><b>{esc(lab.get('subject'))}</b> {esc(d.get('subject'))}</p>" if d.get("subject") else "",
+        block("", d.get("salutation")),
+        block("", d.get("body")),
+        block("", d.get("closing"), d.get("signature_name")),
+    ])
+    family = "NotoTamil, NotoMain, sans-serif" if base_lang(lang) == "ta" else "NotoMain, NotoTamil, sans-serif"
+    css = (
+        "@font-face {font-family: NotoTamil; src: url(NotoSansTamil-Regular.ttf);}"
+        "@font-face {font-family: NotoMain; src: url(NotoSans-Regular.ttf);}"
+        f"body {{font-family: {family}; font-size: 12pt; line-height: 1.5;}}"
+        "p {margin: 0 0 12pt 0;}"
+    )
+    html = f'<div dir="{"rtl" if rtl else "ltr"}">{body_html}</div>'
+    fd, path = tempfile.mkstemp(suffix=".pdf"); os.close(fd)
+    story = fitz.Story(html=html, user_css=css, archive=fitz.Archive(FONT_DIR))
+    writer = fitz.DocumentWriter(path)
+    mediabox = fitz.paper_rect("a4")
+    where = mediabox + (50, 50, -50, -50)
+    more = 1
+    while more:
+        dev = writer.begin_page(mediabox)
+        more, _ = story.place(where)
+        story.draw(dev)
+        writer.end_page()
+    writer.close()
+    return path
+
+def send_letter(sender, result, lang):
+    path = None
+    try:
+        path = build_letter_pdf(result, lang)
+        name = re.sub(r"[^\w\-]+", "_", result.get("doc_type") or "document").strip("_") or "document"
+        ready = (result.get("ready_message") or "").strip()
+        if ready: send_text(sender, ready)
+        send_document(sender, path, f"{name}.pdf")
+    except Exception as e:
+        log.exception(f"PDF create failed: {e}")
+        safe_send_text(sender, MSG["pdf_fail"])
+    finally:
+        if path and os.path.exists(path): os.remove(path)
+
+
+# ---------- MESSAGE HANDLING ----------
+def handle_text(sender, message):
+    user_text = message.get("text", {}).get("body", "").strip()
+    if not user_text: return
+    if wants_image(user_text.lower()):
+        send_text(sender, "Image generate pannuren pa... 🎨 10 sec wait pannunga pa")
+        img_bytes = generate_image_bytes(user_text, "ta")
+        if img_bytes:
+            send_image(sender, img_bytes, "Ungal image ready pa! ✨")
+            try: send_voice(sender, "உங்கள் படம் தயார்!", "ta")
+            except Exception as e: log.warning(f"voice failed: {e}")
+        else:
+            safe_send_text(sender, MSG["img_fail"])
+        return
+
+    result, lang = ask_with_lang(TEXT_PROMPT + user_text, SYSTEM_PROMPT + " Reply with JSON only.")
+    kind = result.get("kind", "chat")
+    if kind == "image":
+        ack = (result.get("reply") or "").strip()
+        if ack: send_text(sender, ack)
+        img_bytes = generate_image_bytes(result.get("image_prompt") or user_text, lang)
+        if img_bytes: send_image(sender, img_bytes, "✨")
+        else: safe_send_text(sender, MSG["img_fail"])
+    elif kind == "document":
+        send_letter(sender, result, lang)
+    else:
+        send_reply(sender, result.get("reply") or "", lang)
+
+def handle_audio(sender, message):
+    data, mime = download_media(message["audio"]["id"])
+    part = types.Part.from_bytes(data=data, mime_type=mime or "audio/ogg")
+    result, lang = ask_with_lang([part, "Answer the speaker."], VOICE_PROMPT)
+    send_reply(sender, result.get("reply") or "", lang)
+
+def handle_image(sender, message):
+    media = message["image"]
+    data, _ = download_media(media["id"])
+    explain_image(sender, data, (media.get("caption") or "").strip())
+
+def handle_document(sender, message):
+    media = message["document"]
+    filename = media.get("filename") or "file"
+    name, mime = filename.lower(), (media.get("mime_type") or "").lower()
+    caption = (media.get("caption") or "").strip()
+    is_pdf = mime == "application/pdf" or name.endswith(".pdf")
+    is_docx = mime == DOCX_MIME or name.endswith(".docx")
+    is_img = mime.startswith("image/")
+    if not (is_pdf or is_docx or is_img): raise UnsupportedFile(filename)
+    data, _ = download_media(media["id"])
+    if is_pdf: explain_pdf(sender, data, filename, caption)
+    elif is_docx: explain_docx(sender, data, filename, caption)
+    else: explain_image(sender, data, caption)
+
+def process_message(sender, message, message_id):
+    if already_processed(message_id): return
+    kind = message.get("type", "")
+    if kind == "reaction": return
+    try:
+        if kind == "text": handle_text(sender, message)
+        elif kind == "audio": handle_audio(sender, message)
+        elif kind == "image": handle_image(sender, message)
+        elif kind == "document": handle_document(sender, message)
+        else: safe_send_text(sender, MSG["type"])
+    except UnsupportedFile:
+        safe_send_text(sender, MSG["type"])
+    except TooBig:
+        safe_send_text(sender, MSG["too_big"])
+    except EmptyFile:
+        safe_send_text(sender, MSG["empty"])
+    except Exception as e:
+        log.exception(f"process_message failed: {e}")
+        safe_send_text(sender, MSG["retry"])
+
+
+# ---------- WEBHOOK ----------
+def valid_signature(raw, header):
+    if not META_APP_SECRET: return True
+    expected = "sha256=" + hmac.new(META_APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, header or "")
+
+@app.get("/")
+def health(): return PlainTextResponse("Kan Paarvai AI is running")
+
+@app.get("/webhook")
+def verify(request: Request):
+    q = request.query_params
+    if VERIFY_TOKEN and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == VERIFY_TOKEN:
+        return PlainTextResponse(q.get("hub.challenge", ""))
+    return PlainTextResponse("forbidden", status_code=403)
+
+@app.post("/webhook")
+async def receive(request: Request, background: BackgroundTasks):
+    raw = await request.body()
+    if not valid_signature(raw, request.headers.get("X-Hub-Signature-256")):
+        return PlainTextResponse("invalid signature", status_code=403)
+    try: payload = json.loads(raw)
+    except ValueError: return PlainTextResponse("bad request", status_code=400)
+    for entry in payload.get("entry", []):
+        for change in entry.get("changes", []):
+            for msg in change.get("value", {}).get("messages", []) or []:
+                background.add_task(process_message, msg.get("from"), msg, msg.get("id"))
+    return PlainTextResponse("ok")
