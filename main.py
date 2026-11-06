@@ -266,27 +266,29 @@ _EMOJI = re.compile("[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f]")
 
 NATIVE_CODES = {code for _, code in _SCRIPT_LANG}
 RUPEE_WORDS = {"ta": "ரூபாய்", "hi": "रुपये", "te": "రూపాయలు", "ml": "രൂപ", "kn": "ರೂಪಾಯಿ", "bn": "টাকা"}
-
- def speech_text(raw, lang_code):
-    t = raw.strip()
-    if not t:
-        return t
-
-    # --- NEW: Tamil money & symbols fix - very important pa ---
-    # ரூ. -> ரூபாய் (fix paisa bug)
-    t = re.sub(r"₹", " ரூபாய் ", t)
-    t = re.sub(r"ரூ\.?", " ரூபாய் ", t)  # ரூ. or ரூ -> ரூபாய்
-    t = re.sub(r"\bRs\.?\b", " ரூபாய் ", t, flags=re.I)
+def speech_text(text, lang):
+ if not text
+ return text
+    """Make text safe for TTS: 1,000 -> 1000, Rs/₹/INR/ரூபாய் -> the word for rupees in the reply's script."""
+    native = None if is_latin_text(text) else guess_lang(text)
+    word = RUPEE_WORDS.get(native, "rupees")
+    text = re.sub(r"(?<=\d),(?=\d)", "", text)
+    num = r"\d+(?:\.\d+)?"
+    text = re.sub(rf"(?:₹|\bRs\.?|\bINR)\s*({num})", rf"\1 {word}", text, flags=re.I)
+    text = re.sub(rf"({num})\s*(?:₹|/-|Rs\.?(?!\w)|INR(?!\w))", rf"\1 {word}", text, flags=re.I)
+    text = re.sub(r"₹|\bRs\.?(?!\w)|\bINR\b", word, text, flags=re.I)
+    text = re.sub(r"\bRs\.?\b", " ரூபாய் ", text, flags=re.I)
     
     # 10000 -> 10,000 maathiri padika vasathi, but tamil la number-a appadiye vitta pothum
     # ரூ.10000 -> ரூபாய் 10000 nu varum
     
     # Date 19.11.2026 -> 19 11 2026 nu space vachatha nalla pronounce pannum
-    t = re.sub(r"(\d+)\.(\d+)\.(\d+)", r"\1 \2 \3", t)  # date fix
+    text = re.sub(r"(\d+)\.(\d+)\.(\d+)", r"\1 \2 \3", text)  # date fix
     
     # Existing code continues...
-    t = re.sub(r"https?://\S+|www\.\S+", " ", t)
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text)
     # ... rest of your code
+return text
 
 def _split_runs(text):
     """Split into runs of Latin / non-Latin letters so each run gets the right voice."""
