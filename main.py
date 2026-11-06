@@ -267,7 +267,7 @@ _EMOJI = re.compile("[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f]")
 NATIVE_CODES = {code for _, code in _SCRIPT_LANG}
 RUPEE_WORDS = {"ta": "ரூபாய்", "hi": "रुपये", "te": "రూపాయలు", "ml": "രൂപ", "kn": "ರೂಪಾಯಿ", "bn": "টাকা"}
 def speech_text(text, lang):
- if not text
+ if not 
  return text
     """Make text safe for TTS: 1,000 -> 1000, Rs/₹/INR/ரூபாய் -> the word for rupees in the reply's script."""
     native = None if is_latin_text(text) else guess_lang(text)
