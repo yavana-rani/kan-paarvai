@@ -6,6 +6,7 @@ import hashlib
 import logging
 import tempfile
 import threading
+import time
 import unicodedata
 import html as htmllib
 from collections import OrderedDict
@@ -40,7 +41,7 @@ MAX_MEDIA_BYTES = 10 * 1024 * 1024
 MAX_PDF_IMAGE_PAGES = 5
 MAX_PDF_TEXT_CHARS = 15000
 MAX_VOICE_CHARS = 1200
-MAX_VOICE_SEGMENTS = 10
+MAX_VOICE_SEGMENTS = 25
 FONT_DIR = str(Path(__file__).resolve().parent / "fonts")
 Path(FONT_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -263,11 +264,34 @@ def send_document(to, path, filename, caption=""):
 TTS_LANGS = tts_langs()
 _EMOJI = re.compile("[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f]")
 
-def _voice_lang(lang, text):
-    code = base_lang(lang)
-    if code == "iw": code = "he"
-    if code != "en" and is_latin_text(text): code = "en"   # Tanglish etc. reads better with English voice
-    return code if code in TTS_LANGS else "en"
+NATIVE_CODES = {code for _, code in _SCRIPT_LANG}
+RUPEE_WORDS = {"ta": "ரூபாய்", "hi": "रुपये", "te": "రూపాయలు", "ml": "രൂപ", "kn": "ರೂಪಾಯಿ", "bn": "টাকা"}
+
+def speech_text(text, lang):
+    """Make text safe for TTS: 1,000 -> 1000, Rs/₹/INR -> the word for rupees in the reply's script."""
+    native = None if is_latin_text(text) else guess_lang(text)
+    word = RUPEE_WORDS.get(native, "rupees")
+    text = re.sub(r"(?<=\d),(?=\d)", "", text)
+    num = r"\d+(?:\.\d+)?"
+    text = re.sub(rf"(?:₹|\bRs\.?|\bINR)\s*({num})", rf"\1 {word}", text, flags=re.I)
+    text = re.sub(rf"({num})\s*(?:₹|/-|Rs\.?(?!\w)|INR(?!\w))", rf"\1 {word}", text, flags=re.I)
+    text = re.sub(r"₹|\bRs\.?(?!\w)|\bINR\b", word, text, flags=re.I)
+    return text
+
+def _split_runs(text):
+    """Split into runs of Latin / non-Latin letters so each run gets the right voice."""
+    runs = []
+    for ch in text:
+        flag = (_script_of(ch) == "LATIN") if ch.isalpha() else None
+        if not runs:
+            runs.append([flag, ch]); continue
+        cur = runs[-1]
+        if flag is None or cur[0] is None or cur[0] == flag:
+            if cur[0] is None: cur[0] = flag
+            cur[1] += ch
+        else:
+            runs.append([flag, ch])
+    return runs
 
 def _voice_chunks(text, size=200):
     sentences = re.split(r"(?<=[.!?।])\s+", text)
@@ -279,15 +303,34 @@ def _voice_chunks(text, size=200):
         if len(cur) + len(s) + 1 > size and cur: chunks.append(cur); cur = s
         else: cur = f"{cur} {s}".strip()
     if cur: chunks.append(cur)
-    return chunks[:MAX_VOICE_SEGMENTS]
+    return chunks
+
+def _voice_pieces(text, lang):
+    """[(chunk, tts_lang)]: English words inside Tamil text are spoken by an English voice."""
+    code = base_lang(lang)
+    if code == "iw": code = "he"
+    base = code if code in TTS_LANGS else "en"
+    latin_lang = "en" if (code in NATIVE_CODES or code not in TTS_LANGS) else code
+    pieces = []
+    for is_latin, run in _split_runs(text):
+        if not re.search(r"\w", run): continue
+        if is_latin is None: vlang = base
+        elif is_latin: vlang = latin_lang
+        else:
+            vlang = guess_lang(run)
+            if vlang not in TTS_LANGS: vlang = "en"
+        for chunk in _voice_chunks(run.strip()):
+            if re.search(r"\w", chunk): pieces.append((chunk, vlang))
+    return pieces[:MAX_VOICE_SEGMENTS]
 
 def send_voice(to, text, lang):
     text = _EMOJI.sub("", clean_text(text))[:MAX_VOICE_CHARS].strip()
-    if not text: return
-    vlang = _voice_lang(lang, text)
+    pieces = _voice_pieces(speech_text(text, lang), lang)
+    if not pieces: return
     audio = BytesIO()
-    for chunk in _voice_chunks(text):
-        gTTS(text=chunk, lang=vlang).write_to_fp(audio)
+    for chunk, vlang in pieces:
+        kw = {"tld": "co.in"} if vlang == "en" else {}
+        gTTS(text=chunk, lang=vlang, **kw).write_to_fp(audio)
     fd, path = tempfile.mkstemp(suffix=".mp3")
     try:
         os.close(fd)
@@ -306,23 +349,30 @@ def send_reply(to, text, lang):
 
 
 # ---------- IMAGE GENERATION ----------
+_img_lock = threading.Lock()
+_last_img = 0.0
+IMG_GAP = 46  # free limit: 1 image per 45 s per IP
+
 def generate_image_bytes(prompt, lang_code="ta"):
+    global _last_img
     full_prompt = prompt
     if "diwali" in prompt.lower():
         full_prompt += ", beautiful Diwali festival, oil lamps, rangoli, colorful, 4k, festive, no text"
-    q = requests.utils.quote(full_prompt)
-    urls = [
-        f"https://image.pollinations.ai/prompt/{q}?width=1024&height=1024&nologo=true&model=flux",
-        f"https://image.pollinations.ai/prompt/{q}?width=768&height=768&nologo=true",
-    ]
-    for url in urls:
-        try:
-            r = requests.get(url, timeout=60)
-            if r.ok and r.headers.get("Content-Type", "").startswith("image"):
-                return r.content
-            log.error(f"Image gen HTTP {r.status_code}: {r.text[:200]}")
-        except Exception as e:
-            log.error(f"Image gen failed: {e}")
+    url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(full_prompt)}?width=1024&height=1024&nologo=true&model=flux"
+    with _img_lock:  # one request at a time, spaced out to respect the free limit
+        for attempt in range(3):
+            gap = IMG_GAP - (time.time() - _last_img)
+            if gap > 0: time.sleep(gap)
+            _last_img = time.time()
+            try:
+                r = requests.get(url, timeout=90)
+                if r.ok and r.headers.get("Content-Type", "").startswith("image"):
+                    return r.content
+                log.error(f"Image gen HTTP {r.status_code}: {r.text[:200]}")
+                m = re.search(r"Retry after (\d+)s", r.text)
+                if m: time.sleep(min(int(m.group(1)) + 2, 60))
+            except Exception as e:
+                log.error(f"Image gen failed: {e}")
     return None
 
 IMAGE_NOUNS = ("image", "picture", "photo", "poster", "logo", "greeting card")
@@ -473,7 +523,7 @@ def handle_text(sender, message):
     user_text = message.get("text", {}).get("body", "").strip()
     if not user_text: return
     if wants_image(user_text.lower()):
-        send_text(sender, "Image generate pannuren pa... 🎨 10 sec wait pannunga pa")
+        send_text(sender, "Image generate pannuren pa... 🎨 1 min wait pannunga pa")
         img_bytes = generate_image_bytes(user_text, "ta")
         if img_bytes:
             send_image(sender, img_bytes, "Ungal image ready pa! ✨")
