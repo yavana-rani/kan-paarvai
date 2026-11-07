@@ -55,8 +55,10 @@ client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 GRAPH = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
 STYLE_RULES = "Keep answers short, simple and clear. Write math formulas as plain text, e.g. πr^2, a^2 + b^2 = c^2, x × y, a ÷ b; do not use * or markdown."
+TAMIL_HINT = (" If you write Tamil, use correct standard spelling and proper school maths terms "
+              "(e.g. வடிவொத்த முக்கோணங்கள், தொடுகோடு, நேர்மாறுபாடு, எதிர்மாறுபாடு). Never put symbols like • inside words.")
 LANG_HINT = ' "language" is the ISO 639-1 code of your reply (e.g. ta, en, hi).'
-SYSTEM_PROMPT = f"You are Kan Paarvai AI, a helpful WhatsApp assistant. Always reply in the SAME language the user used. If there is no user text, reply in language code '{DEFAULT_LANG}'. " + STYLE_RULES
+SYSTEM_PROMPT = f"You are Kan Paarvai AI, a helpful WhatsApp assistant. Always reply in the SAME language the user used. If there is no user text, reply in language code '{DEFAULT_LANG}'. " + STYLE_RULES + TAMIL_HINT
 
 TEXT_PROMPT = """You ARE ABLE to generate images. NEVER say "I cannot generate images". If user asks for an image, you MUST return kind="image".
 Read the user's message and reply with ONLY one JSON object, no markdown fences:
@@ -74,7 +76,7 @@ Rules:
 - For "chat": put answer in "reply".
 """ + STYLE_RULES + "\n\nUser message:\n"
 
-MEDIA_PROMPT = """Reply with ONLY one JSON object: {"language": "", "reply": ""} Answer in caption language, otherwise '""" + DEFAULT_LANG + """'. """ + STYLE_RULES + LANG_HINT + " "
+MEDIA_PROMPT = """Reply with ONLY one JSON object: {"language": "", "reply": ""} Answer in caption language, otherwise '""" + DEFAULT_LANG + """'. """ + STYLE_RULES + LANG_HINT + TAMIL_HINT + " "
 
 VOICE_PROMPT = 'Reply with ONLY one JSON object: {"language": "", "reply": ""} Listen to the audio and answer it in the same language the speaker used. ' + STYLE_RULES + LANG_HINT
 
@@ -172,6 +174,42 @@ RTL_LANGS = {"ar","fa","ur","he","iw"}
 def base_lang(code): return (code or "").strip().lower().replace("_","-").split("-")[0]
 
 
+# ---------- TAMIL MATHS SPELLING ----------
+TAMIL_RANGE = "\u0B80-\u0BFF"
+TAMIL_FIXES = [  # (wrong, right) - add more here whenever you spot a repeated mistake
+    ("வடிசவொ", "வடிவொ"),                  # வடிவொத்த (similar) triangles
+    ("நேர்மொறுபாடு", "நேர்மாறுபாடு"),      # direct variation
+    ("எதிர்மொறுபாடு", "எதிர்மாறுபாடு"),    # inverse variation
+    ("மொறுபாடு", "மாறுபாடு"),
+]
+
+def correct_tamil_maths_spelling(text):
+    """Fix common broken Tamil spellings/symbols that come from garbled PDF text."""
+    if not text or not re.search(f"[{TAMIL_RANGE}]", text): return text
+    text = unicodedata.normalize("NFC", text)                      # ெ+ா -> ொ
+    text = re.sub("[\u0BCA\u0BCB]\u0BBE", lambda m: m.group(0)[0], text)   # ொா -> ொ, ோா -> ோ
+    text = re.sub(f"(?<=[{TAMIL_RANGE}])[ \\t]*[•·][ \\t]*(?=[{TAMIL_RANGE}])", "", text)  # ஆவண • மாகும்
+    for wrong, right in TAMIL_FIXES:
+        text = text.replace(wrong, right)
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+def clean_for_speech(text):
+    """Spelling first, then drop leftover bullets (they are never spoken)."""
+    return re.sub(r"[•·●▪]", " ", correct_tamil_maths_spelling(text))
+
+def looks_garbled(text):
+    """True when extracted PDF text is probably broken (old Tamil fonts): stray bullets, orphan vowel signs."""
+    flat = re.sub(r"\s+", "", text or "")
+    if not flat: return True
+    tamil = sum(1 for c in flat if "\u0B80" <= c <= "\u0BFF")
+    if tamil:
+        orphans = len(re.findall(r"(?:^|[\s•])[\u0BBE-\u0BCD]", text))
+        doubles = len(re.findall("[\u0BC6\u0BC7\u0BCA\u0BCB]\u0BBE", text))
+        return (orphans + doubles) / tamil > 0.01 or text.count("•") / len(flat) > 0.003
+    odd = sum(1 for c in flat if "\u00c0" <= c <= "\u00ff" or c == "\ufffd")
+    return odd / len(flat) > 0.05
+
+
 # ---------- GEMINI ----------
 def ask_gemini(contents, system=SYSTEM_PROMPT, clean=True, json_mode=False):
     if not client: raise RuntimeError("GEMINI_API_KEY not set")
@@ -193,33 +231,6 @@ def parse_json(raw):
     raw=(raw or "").strip(); start, end = raw.find("{"), raw.rfind("}")
     if start==-1 or end==-1: raise ValueError("no JSON")
     return json.loads(raw[start:end+1])
- def correct_tamil_maths_spelling(text):
-    # Common PDF OCR mistakes for 10th Maths
-    corrections = {
-        "வடிசவொாத்த": "வடிவொத்த",
-        "வடிச": "வடிவ",
-        "ொாத்த": "ொத்த",
-        "மொறுபாடு": "மாறுபாடு",
-        "நேர்மொறுபாடு": "நேர்மாறுபாடு",
-        "எதிர்மொறுபாடு": "எதிர்மாறுபாடு",
-        "ஆவண • மாகும்": "ஆவணமாகும்",
-        " • மா": "மா",
-        "கணிதச்": "கணித",
-        "தொடுகோடுகள்,": "தொடுகோடுகள்,",
-    }
-    for wrong, correct in corrections.items():
-        text = text.replace(wrong, correct)
-    
-    # Remove stray bullet symbols
-    text = text.replace(" • ", "").replace(" •", "").replace("•", "")
-    # Fix double spaces
-    text = re.sub(r"\s{2,}", " ", text)
-    return text.strip()
-
-def clean_for_speech(text):
-    # Maths symbols ku spelling correction pannathukku aprom
-    text = correct_tamil_maths_spelling(text)
-    return text
 
 def ask_with_lang(contents, system):
     try:
@@ -418,7 +429,7 @@ def _voice_pieces(text, lang):
     return pieces[:MAX_VOICE_SEGMENTS]
 
 def send_voice(to, text, lang):
-    text = _EMOJI.sub("", clean_text(text))[:MAX_VOICE_CHARS].strip()
+    text = clean_for_speech(_EMOJI.sub("", clean_text(text)))[:MAX_VOICE_CHARS].strip()
     pieces = _voice_pieces(speech_text(text, lang), lang)
     if not pieces: return
     audio = BytesIO()
@@ -436,7 +447,7 @@ def send_voice(to, text, lang):
 
 def send_reply(to, text, lang):
     """Text first, then a voice copy. Voice failure never blocks the text."""
-    text = (text or "").strip() or MSG["retry"]
+    text = correct_tamil_maths_spelling((text or "").strip()) or MSG["retry"]
     send_text(to, text)
     try: send_voice(to, text, lang)
     except Exception as e: log.warning(f"voice failed: {e}")
@@ -496,18 +507,22 @@ def explain_image(sender, data, caption):
 
 
 # ---------- READ PDF / WORD ----------
+def _sample_pages(pages, n):
+    if pages <= n: return list(range(pages))
+    return sorted({round(i * (pages - 1) / (n - 1)) for i in range(n)})
+
 def read_pdf(data):
-    """Returns (page_count, text, image_parts). Scanned PDFs fall back to page images."""
+    """Returns (page_count, text, image_parts). Scanned or garbled PDFs are read from page images."""
     doc = fitz.open(stream=data, filetype="pdf")
     try:
         if doc.needs_pass: raise EmptyFile()
         pages = doc.page_count
         text = "\n".join(p.get_text() for p in doc).strip()
-        if len(re.sub(r"\s+", "", text)) >= 50:
+        if len(re.sub(r"\s+", "", text)) >= 50 and not looks_garbled(text):
             return pages, text[:MAX_PDF_TEXT_CHARS], []
         parts = []
-        for i in range(min(pages, MAX_PDF_IMAGE_PAGES)):
-            pix = doc[i].get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+        for i in _sample_pages(pages, MAX_PDF_IMAGE_PAGES):   # spread across the file, not just the first pages
+            pix = doc[i].get_pixmap(matrix=fitz.Matrix(2, 2))
             parts.append(types.Part.from_bytes(data=pix.tobytes("jpeg"), mime_type="image/jpeg"))
         if not parts: raise EmptyFile()
         return pages, "", parts
@@ -527,7 +542,8 @@ def read_docx(data):
 
 def explain_pdf(sender, data, filename, caption):
     pages, text, image_parts = read_pdf(data)
-    contents = image_parts if image_parts else [f"Document text:\n{text}"]
+    contents = ([*image_parts, f"These are {len(image_parts)} sample pages, spread across a {pages}-page PDF."]
+                if image_parts else [f"Document text:\n{text}"])
     contents = list(contents) + [f"Caption: {caption}" if caption else "No caption."]
     result, lang = ask_with_lang(contents, DOC_PROMPT)
     header = f"📄 {filename} ({pages} page{'s' if pages != 1 else ''})"
@@ -852,3 +868,4 @@ async def receive(request: Request, background: BackgroundTasks):
             for msg in change.get("value", {}).get("messages", []) or []:
                 background.add_task(process_message, msg.get("from"), msg, msg.get("id"))
     return PlainTextResponse("ok")
+
