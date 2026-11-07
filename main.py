@@ -266,27 +266,76 @@ _EMOJI = re.compile("[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f]")
 
 NATIVE_CODES = {code for _, code in _SCRIPT_LANG}
 RUPEE_WORDS = {"ta": "ரூபாய்", "hi": "रुपये", "te": "రూపాయలు", "ml": "രൂപ", "kn": "ರೂಪಾಯಿ", "bn": "টাকা"}
+
+MATH_WORDS = {
+    "en": dict(plus="plus", minus="minus", times="times", div="divided by", eq="equals",
+               ne="is not equal to", lt="is less than", gt="is greater than",
+               le="is less than or equal to", ge="is greater than or equal to",
+               sq="squared", cube="cubed", pow="to the power of", root="square root of",
+               pi="pi", pct="percent", range="{0} to {1}"),
+    "ta": dict(plus="கூட்டல்", minus="கழித்தல்", times="பெருக்கல்", div="வகுத்தல்", eq="சமம்",
+               ne="சமம் அல்ல", lt="சிறியது", gt="பெரியது",
+               le="சிறியது அல்லது சமம்", ge="பெரியது அல்லது சமம்",
+               sq="வர்க்கம்", cube="கனம்", pow="அடுக்கு", root="வர்க்கமூலம்",
+               pi="பை", pct="சதவீதம்", range="{0} முதல் {1} வரை"),
+    "hi": dict(plus="जमा", minus="घटा", times="गुणा", div="भाग", eq="बराबर",
+               ne="बराबर नहीं", lt="छोटा", gt="बड़ा", le="छोटा या बराबर", ge="बड़ा या बराबर",
+               sq="का वर्ग", cube="का घन", pow="की घात", root="वर्गमूल",
+               pi="पाई", pct="प्रतिशत", range="{0} से {1} तक"),
+}
+# Tamil letter names, so variables (a, b, x...) are read by the Tamil voice
+TA_LETTERS = dict(zip("abcdefghijklmnopqrstuvwxyz", [
+    "ஏ", "பி", "சி", "டி", "இ", "எஃப்", "ஜி", "எச்", "ஐ", "ஜே", "கே", "எல்", "எம்",
+    "என்", "ஓ", "பீ", "கியூ", "ஆர்", "எஸ்", "டீ", "யூ", "வி", "டபிள்யூ", "எக்ஸ்", "வை", "இசட்"]))
+
+_VAR = r"(?<![A-Za-z])[A-Za-z](?![A-Za-z])"
+_LEFT = rf"(?:{_VAR}|\d[A-Za-z]{{1,3}}(?![A-Za-z])|\d|\)|π|ரூபாய்|रुपये|rupees)(?:\^\(?-?\w+\)?|[²³])?"
+# right operand: number, "(", √, π, or a lone letter that is not an article ("a great deal")
+_RIGHT = rf"(?=[\d(√π]|(?<![A-Za-z])[A-Za-z](?![A-Za-z])(?!\s+[A-Za-z]{{2,}}))"
+
+def _binop(text, op, word):
+    return re.sub(rf"({_LEFT})\s*(?:{op})\s*{_RIGHT}", lambda m: f"{m.group(1)} {word} ", text)
+
+def math_speech(text, native):
+    """Speak formulas: a^2 - b^2 = c -> 'a squared minus b squared equals c' (in the reply's language)."""
+    w = MATH_WORDS.get(native, MATH_WORDS["en"])
+    text = text.replace("<=", "≤").replace(">=", "≥").replace("!=", "≠")
+    text = re.sub(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})",
+                  lambda m: w["range"].format(m.group(1), m.group(2)), text)   # 10:30 - 11:30
+    mathy = bool(re.search(r"[=+×÷^√π≤≥≠²³<>]|\d\s*[*/]\s*\d|(?<![A-Za-z])[A-Za-z]\s*[-−–]\s*[\dA-Za-z(]", text))
+    if not mathy:  # plain "10-20" is a range, not a subtraction
+        text = re.sub(r"(?<![\d:.])(\d+)\s*[-–]\s*(\d+)(?![\d:.])",
+                      lambda m: w["range"].format(m.group(1), m.group(2)), text)
+    for op, key in ((r"[-−–]", "minus"), (r"\+", "plus"), (r"[*×]", "times"),
+                    (r"[÷/]", "div"), (r"<", "lt"), (r">", "gt")):
+        text = _binop(text, op, w[key])
+    for sym, key in (("=", "eq"), ("≠", "ne"), ("≤", "le"), ("≥", "ge"), ("π", "pi"),
+                     ("√", "root"), ("÷", "div"), ("×", "times"), ("%", "pct")):
+        text = text.replace(sym, f" {w[key]} ")
+    text = re.sub(r"\^\s*2(?!\d)|²", f" {w['sq']} ", text)
+    text = re.sub(r"\^\s*3(?!\d)|³", f" {w['cube']} ", text)
+    text = re.sub(r"\^\s*\(?\s*(-?[\w.]+)\s*\)?", lambda m: f" {w['pow']} {m.group(1)} ", text)
+    text = re.sub(rf"(?<![\w)])[-−](?=\d|\(|{_VAR})", f" {w['minus']} ", text)   # negative numbers: -5
+    if native == "ta" and mathy:
+        text = re.sub(r"(?<![A-Za-z/])[A-Za-z](?![A-Za-z/])", lambda m: f" {TA_LETTERS[m.group(0).lower()]} ", text)
+        text = re.sub(r"(?<=\d)([A-Za-z]{1,3})(?![A-Za-z])",
+                      lambda m: " " + " ".join(TA_LETTERS[c.lower()] for c in m.group(1)) + " ", text)  # 2ab
+    text = re.sub(r"(வரை|तक)(\s+\1)+", r"\1", text)   # text already said "வரை"/"तक"
+    return re.sub(r"[ \t]{2,}", " ", text)
+
 def speech_text(text, lang):
-    """Make text safe for TTS: 1,000 -> 1000, Rs/₹/INR/ரூபாய் -> the word for rupees in the reply's script."""
+    """Make text safe for TTS: remove URLs, 1,000 -> 1000, 19.11.2026 -> 19 11 2026,
+    Rs / ₹ / INR / ரூ -> rupees word, and maths symbols (+ - × ÷ = ^ √ π ...) -> spoken words."""
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text)
     native = None if is_latin_text(text) else guess_lang(text)
     word = RUPEE_WORDS.get(native, "rupees")
     text = re.sub(r"(?<=\d),(?=\d)", "", text)
+    text = re.sub(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})\b", r"\1 \2 \3", text)
     num = r"\d+(?:\.\d+)?"
-    text = re.sub(rf"(?:₹|\bRs\.?|\bINR)\s*({num})", rf"\1 {word}", text, flags=re.I)
+    text = re.sub(rf"(?:₹|\bRs\.?|\bINR|ரூ\.?)\s*({num})", rf"\1 {word}", text, flags=re.I)
     text = re.sub(rf"({num})\s*(?:₹|/-|Rs\.?(?!\w)|INR(?!\w))", rf"\1 {word}", text, flags=re.I)
     text = re.sub(r"₹|\bRs\.?(?!\w)|\bINR\b", word, text, flags=re.I)
-    text = re.sub(r"\bRs\.?\b", " ரூபாய் ", text, flags=re.I)
-    
-    # 10000 -> 10,000 maathiri padika vasathi, but tamil la number-a appadiye vitta pothum
-    # ரூ.10000 -> ரூபாய் 10000 nu varum
-    
-    # Date 19.11.2026 -> 19 11 2026 nu space vachatha nalla pronounce pannum
-    text = re.sub(r"(\d+)\.(\d+)\.(\d+)", r"\1 \2 \3", text)  # date fix
-    
-    # Existing code continues...
-    text = re.sub(r"https?://\S+|www\.\S+", " ", text)
-    # ... rest of your code
-return text
+    return math_speech(text, native)
 
 def _split_runs(text):
     """Split into runs of Latin / non-Latin letters so each run gets the right voice."""
