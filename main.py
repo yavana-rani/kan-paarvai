@@ -193,6 +193,33 @@ def parse_json(raw):
     raw=(raw or "").strip(); start, end = raw.find("{"), raw.rfind("}")
     if start==-1 or end==-1: raise ValueError("no JSON")
     return json.loads(raw[start:end+1])
+ def correct_tamil_maths_spelling(text):
+    # Common PDF OCR mistakes for 10th Maths
+    corrections = {
+        "வடிசவொாத்த": "வடிவொத்த",
+        "வடிச": "வடிவ",
+        "ொாத்த": "ொத்த",
+        "மொறுபாடு": "மாறுபாடு",
+        "நேர்மொறுபாடு": "நேர்மாறுபாடு",
+        "எதிர்மொறுபாடு": "எதிர்மாறுபாடு",
+        "ஆவண • மாகும்": "ஆவணமாகும்",
+        " • மா": "மா",
+        "கணிதச்": "கணித",
+        "தொடுகோடுகள்,": "தொடுகோடுகள்,",
+    }
+    for wrong, correct in corrections.items():
+        text = text.replace(wrong, correct)
+    
+    # Remove stray bullet symbols
+    text = text.replace(" • ", "").replace(" •", "").replace("•", "")
+    # Fix double spaces
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+def clean_for_speech(text):
+    # Maths symbols ku spelling correction pannathukku aprom
+    text = correct_tamil_maths_spelling(text)
+    return text
 
 def ask_with_lang(contents, system):
     try:
