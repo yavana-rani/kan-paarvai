@@ -745,3 +745,42 @@ async def receive(request: Request, background: BackgroundTasks):
             for msg in change.get("value", {}).get("messages", []) or []:
                 background.add_task(process_message, msg.get("from"), msg, msg.get("id"))
     return PlainTextResponse("ok")
+ @app.route("/privacy")
+def privacy():
+    return """
+    <html><head><title>Kan Paarvai AI - Privacy Policy</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>body{font-family:Arial;padding:20px;max-width:800px;margin:auto;line-height:1.6}</style>
+    </head><body>
+    <h1>Privacy Policy - Kan Paarvai AI</h1>
+    <p><b>Last Updated: 7 Nov 2026</b></p>
+    <p><b>App Name:</b> Kan Paarvai AI (Kan Paarvai means 'Vision' in Tamil)</p>
+    
+    <h3>1. What we collect</h3>
+    <p>We receive messages you send on WhatsApp (text, image, PDF, voice) to provide AI answers. We do not collect your phone number beyond what WhatsApp provides for replying.</p>
+    
+    <h3>2. How we use it</h3>
+    <p>Your message is sent to AI services (Google Gemini for text understanding, gTTS for voice) only to generate a reply. Processing is real-time.</p>
+    
+    <h3>3. Data Storage</h3>
+    <p>We do NOT store your images, PDFs, or voice permanently. Temporary files are deleted immediately after processing. We do not create user profiles.</p>
+    
+    <h3>4. Sharing</h3>
+    <p>We do not sell or share your data. Only AI providers (Google) process the content to give answer.</p>
+    
+    <h3>5. User Rights</h3>
+    <p>You can stop using the bot anytime by blocking the WhatsApp number. To delete any data, message us "DELETE MY DATA" on WhatsApp.</p>
+    
+    <h3>6. Contact</h3>
+    <p>Email: kanpaarvai.ai@gmail.com<br>Location: Madurai, Tamil Nadu, India</p>
+    
+    <h3>7. Children's Use</h3>
+    <p>Our service is safe for students (Class 1-12) for educational purposes like explaining school notices and homework.</p>
+    
+    <p><a href="/">Back to Home</a></p>
+    </body></html>
+    """
+
+@app.route("/")
+def home():
+    return "Kan Paarvai AI is running - Your Eyes That Can See and Speak! | கண் பார்வை AI இயங்குகிறது!"
