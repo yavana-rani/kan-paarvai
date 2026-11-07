@@ -9,6 +9,7 @@ import threading
 import time
 import unicodedata
 import html as htmllib
+from html.parser import HTMLParser
 from collections import OrderedDict
 from datetime import datetime
 from io import BytesIO
@@ -85,11 +86,16 @@ DOC_PROMPT = MEDIA_PROMPT + (
     "the main topics, and the key points or numbers. If the caption asks a question, answer it too."
 )
 
+HTML_PROMPT = MEDIA_PROMPT + (
+    "Task: this is a web page (HTML file). Explain in 4-6 short lines what it contains: what the page is about "
+    "or does, its main sections, and the key points. Do not show code. If the caption asks a question, answer it too."
+)
+
 MSG = {
     "retry": "Please try again in a little while 🙏 (Konjam neram kalichu muyarchikavum pa)",
     "too_big": "File is too big, max 10 MB (File romba perusu pa)",
     "empty": "There is no text in this file (File la text illa pa)",
-    "type": "Please send text, voice, image, PDF or Word files (Text, voice, image, PDF, Word file mattum anuppunga pa)",
+    "type": "Please send text, voice, image, PDF, Word or HTML files (Text, voice, image, PDF, Word, HTML file mattum anuppunga pa)",
     "pdf_fail": "Sorry, the PDF could not be created. Please try again later.",
     "img_fail": "Sorry, image could not be created. Please try again later (Image create panna mudiyala pa)",
 }
@@ -504,6 +510,72 @@ def explain_docx(sender, data, filename, caption):
     send_reply(sender, f"📝 {filename}\n\n{result.get('reply') or MSG['retry']}", lang)
 
 
+# ---------- READ HTML ----------
+class _HTMLReader(HTMLParser):
+    """Collects visible text (no scripts/styles) plus a few structure facts."""
+    SKIP = {"script", "style", "noscript", "template", "svg"}
+    HEADS = {"h1", "h2", "h3"}
+    BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
+             "header", "footer", "ul", "ol", "table", "pre", "blockquote", "nav", "main"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.text, self.headings = [], []
+        self.title = ""
+        self.links = self.images = self.forms = self.scripts = 0
+        self._skip, self._in_title, self._head = 0, False, None
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self._skip += 1
+            if tag == "script": self.scripts += 1
+            return
+        if tag == "title": self._in_title = True
+        elif tag == "a" and dict(attrs).get("href"): self.links += 1
+        elif tag == "img": self.images += 1
+        elif tag == "form": self.forms += 1
+        if tag in self.HEADS: self._head = []
+        if tag in self.BLOCK: self.text.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP:
+            self._skip = max(0, self._skip - 1); return
+        if tag == "title": self._in_title = False
+        if tag in self.HEADS and self._head is not None:
+            h = " ".join("".join(self._head).split())
+            if h: self.headings.append(h)
+            self._head = None
+        if tag in self.BLOCK: self.text.append("\n")
+
+    def handle_data(self, data):
+        if self._skip: return
+        if self._in_title: self.title += data; return
+        self.text.append(data)
+        if self._head is not None: self._head.append(data)
+
+def decode_html(data):
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"): return data.decode("utf-16", errors="replace")
+    try: return data.decode("utf-8-sig")
+    except UnicodeDecodeError: return data.decode("cp1252", errors="replace")
+
+def read_html(data):
+    p = _HTMLReader()
+    p.feed(decode_html(data)); p.close()
+    body = re.sub(r"[ \t\r\f\v]+", " ", "".join(p.text))
+    body = re.sub(r"\n\s*\n+", "\n", body).strip()
+    title = " ".join(p.title.split())
+    if not body and not title and not p.scripts: raise EmptyFile()
+    return (f"Title: {title or '-'}\n"
+            f"Headings: {' | '.join(p.headings[:15]) or '-'}\n"
+            f"Links: {p.links}, Images: {p.images}, Forms: {p.forms}, Scripts: {p.scripts}\n\n"
+            f"Visible text:\n{body[:MAX_PDF_TEXT_CHARS] or '(none - the page is built by scripts)'}")
+
+def explain_html(sender, data, filename, caption):
+    info = read_html(data)
+    result, lang = ask_with_lang([f"HTML page summary:\n{info}", f"Caption: {caption}" if caption else "No caption."], HTML_PROMPT)
+    send_reply(sender, f"🌐 {filename}\n\n{result.get('reply') or MSG['retry']}", lang)
+
+
 # ---------- CREATE LETTER PDF ----------
 def build_letter_pdf(d, lang):
     if not fonts_ready(): ensure_fonts()
@@ -615,11 +687,13 @@ def handle_document(sender, message):
     caption = (media.get("caption") or "").strip()
     is_pdf = mime == "application/pdf" or name.endswith(".pdf")
     is_docx = mime == DOCX_MIME or name.endswith(".docx")
+    is_html = mime in ("text/html", "application/xhtml+xml") or name.endswith((".html", ".htm", ".xhtml"))
     is_img = mime.startswith("image/")
-    if not (is_pdf or is_docx or is_img): raise UnsupportedFile(filename)
+    if not (is_pdf or is_docx or is_html or is_img): raise UnsupportedFile(filename)
     data, _ = download_media(media["id"])
     if is_pdf: explain_pdf(sender, data, filename, caption)
     elif is_docx: explain_docx(sender, data, filename, caption)
+    elif is_html: explain_html(sender, data, filename, caption)
     else: explain_image(sender, data, caption)
 
 def process_message(sender, message, message_id):
