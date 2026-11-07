@@ -20,7 +20,7 @@ import requests
 import fitz  # PyMuPDF
 from PIL import Image, ImageOps
 from fastapi import FastAPI, Request, BackgroundTasks
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 from gtts import gTTS
 from gtts.lang import tts_langs
 from google import genai
@@ -33,6 +33,8 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "")
+BUSINESS_NAME = os.getenv("BUSINESS_NAME", "Kan Paarvai AI")
+CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "")
 GRAPH_VERSION = os.getenv("GRAPH_API_VERSION", "v22.0")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-2.0-flash").split(",") if m.strip()]
@@ -717,6 +719,80 @@ def process_message(sender, message, message_id):
         safe_send_text(sender, MSG["retry"])
 
 
+# ---------- PRIVACY POLICY (served at /privacy) ----------
+PRIVACY_UPDATED = "November 7, 2026"
+_PRIVACY_TEMPLATE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy - @@BIZ@@</title>
+<style>
+:root{--bg:#ffffff;--fg:#1d1d1f;--muted:#5f6368;--accent:#0b7a4b}
+@media (prefers-color-scheme: dark){:root{--bg:#121212;--fg:#ececec;--muted:#a0a4a8;--accent:#4cc38a}}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.6;margin:0}
+main{max-width:760px;margin:0 auto;padding:24px 18px 48px}
+h1{font-size:1.7rem;margin:.2em 0}h2{font-size:1.15rem;margin:1.6em 0 .4em;color:var(--accent)}
+p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}
+</style></head><body><main>
+<h1>Privacy Policy</h1>
+<p class="muted">@@BIZ@@ &middot; Last updated: @@DATE@@</p>
+
+<h2>1. About this service</h2>
+<p>@@BIZ@@ ("we", "us") is an AI assistant that works inside WhatsApp. You send a message to our WhatsApp number and we reply. This policy explains what information we handle when you use it.</p>
+
+<h2>2. Information we receive</h2>
+<ul>
+<li><b>Your phone number and WhatsApp name</b>, provided by WhatsApp so we can reply to you.</li>
+<li><b>The messages you send</b>: text, voice notes, images, and PDF, Word or HTML files.</li>
+<li><b>Technical information</b> such as message IDs and error details, which our hosting provider may keep in server logs.</li>
+</ul>
+<p>We only act on messages you send to us. We do not send promotions or unsolicited messages.</p>
+
+<h2>3. How we use it</h2>
+<ul>
+<li>To understand your message and reply in your language, as text and as a short voice message.</li>
+<li>To describe your images, summarise your files, create images you ask for, and create letters as PDF.</li>
+<li>To keep the service working, prevent duplicate replies and fix errors.</li>
+</ul>
+<p>We do not sell your information and we do not use it for advertising.</p>
+
+<h2>4. Other services that process your content</h2>
+<p>To give you a reply, your message content is sent to these providers, who handle it under their own terms and privacy policies:</p>
+<ul>
+<li><b>Meta / WhatsApp</b>: delivers messages and media between you and us.</li>
+<li><b>Google Gemini</b>: reads your text, voice, images and file contents and writes the reply.</li>
+<li><b>Google text-to-speech</b>: turns the reply text into the voice message.</li>
+<li><b>Pollinations (image generation)</b>: receives only the description of the image you asked for.</li>
+<li><b>Our hosting provider (Render)</b>: runs the service and may keep technical logs.</li>
+</ul>
+
+<h2>5. How long we keep information</h2>
+<p>We do not build a profile or a history of your conversations. Files, images and audio are handled in temporary memory or temporary files and are deleted once your reply is sent. Message IDs are held in memory only to avoid answering the same message twice and are lost when the service restarts. Technical logs kept by our hosting provider may contain your phone number and error details for a limited time set by that provider.</p>
+
+<h2>6. Your choices and deletion</h2>
+<p>You can stop using the service at any time by no longer messaging us, and you can block the number in WhatsApp. To ask what we hold about you, or to have any data about you deleted, email us at @@EMAIL@@ with your WhatsApp number and we will respond within a reasonable time.</p>
+
+<h2>7. Security</h2>
+<p>Messages from WhatsApp are verified using Meta's signature, and data is sent over encrypted connections. No online service can be guaranteed to be completely secure.</p>
+
+<h2>8. Children</h2>
+<p>This service is not directed at children under 13, and we do not knowingly collect information from them.</p>
+
+<h2>9. AI-generated content</h2>
+<p>Replies are produced by AI and may contain mistakes. Please do not rely on them for medical, legal or financial decisions, and do not send sensitive personal documents such as passwords or bank details.</p>
+
+<h2>10. Changes</h2>
+<p>We may update this policy. The date at the top shows when it last changed.</p>
+
+<h2>11. Contact</h2>
+<p>@@BIZ@@ &middot; @@EMAIL@@</p>
+</main></body></html>"""
+
+def privacy_html():
+    email = htmllib.escape(CONTACT_EMAIL) if CONTACT_EMAIL else "[set the CONTACT_EMAIL setting]"
+    return (_PRIVACY_TEMPLATE.replace("@@BIZ@@", htmllib.escape(BUSINESS_NAME))
+            .replace("@@DATE@@", PRIVACY_UPDATED).replace("@@EMAIL@@", email))
+
+
 # ---------- WEBHOOK ----------
 def valid_signature(raw, header):
     if not META_APP_SECRET: return True
@@ -725,6 +801,10 @@ def valid_signature(raw, header):
 
 @app.get("/")
 def health(): return PlainTextResponse("Kan Paarvai AI is running")
+
+@app.get("/privacy")
+@app.get("/privacy-policy")
+def privacy(): return HTMLResponse(privacy_html())
 
 @app.get("/webhook")
 def verify(request: Request):
@@ -745,42 +825,3 @@ async def receive(request: Request, background: BackgroundTasks):
             for msg in change.get("value", {}).get("messages", []) or []:
                 background.add_task(process_message, msg.get("from"), msg, msg.get("id"))
     return PlainTextResponse("ok")
- @app.route("/privacy")
-def privacy():
-    return """
-    <html><head><title>Kan Paarvai AI - Privacy Policy</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>body{font-family:Arial;padding:20px;max-width:800px;margin:auto;line-height:1.6}</style>
-    </head><body>
-    <h1>Privacy Policy - Kan Paarvai AI</h1>
-    <p><b>Last Updated: 7 Nov 2026</b></p>
-    <p><b>App Name:</b> Kan Paarvai AI (Kan Paarvai means 'Vision' in Tamil)</p>
-    
-    <h3>1. What we collect</h3>
-    <p>We receive messages you send on WhatsApp (text, image, PDF, voice) to provide AI answers. We do not collect your phone number beyond what WhatsApp provides for replying.</p>
-    
-    <h3>2. How we use it</h3>
-    <p>Your message is sent to AI services (Google Gemini for text understanding, gTTS for voice) only to generate a reply. Processing is real-time.</p>
-    
-    <h3>3. Data Storage</h3>
-    <p>We do NOT store your images, PDFs, or voice permanently. Temporary files are deleted immediately after processing. We do not create user profiles.</p>
-    
-    <h3>4. Sharing</h3>
-    <p>We do not sell or share your data. Only AI providers (Google) process the content to give answer.</p>
-    
-    <h3>5. User Rights</h3>
-    <p>You can stop using the bot anytime by blocking the WhatsApp number. To delete any data, message us "DELETE MY DATA" on WhatsApp.</p>
-    
-    <h3>6. Contact</h3>
-    <p>Email: kanpaarvai.ai@gmail.com<br>Location: Madurai, Tamil Nadu, India</p>
-    
-    <h3>7. Children's Use</h3>
-    <p>Our service is safe for students (Class 1-12) for educational purposes like explaining school notices and homework.</p>
-    
-    <p><a href="/">Back to Home</a></p>
-    </body></html>
-    """
-
-@app.route("/")
-def home():
-    return "Kan Paarvai AI is running - Your Eyes That Can See and Speak! | கண் பார்வை AI இயங்குகிறது!"
