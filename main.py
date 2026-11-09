@@ -54,7 +54,7 @@ app = FastAPI(title="Kan Paarvai AI")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 GRAPH = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
-STYLE_RULES = "Keep answers short, simple and clear. Write math formulas as plain text, e.g. πr^2, a^2 + b^2 = c^2, x × y, a ÷ b; do not use * or markdown."
+STYLE_RULES = "Keep answers short, simple and clear. Write math formulas as plain text, e.g. πr^2, a^2 + b^2 = c^2, x × y, a ÷ b; do not use * or markdown. Always write every formula completely, with both sides of '=', one formula per line; never drop the left side."
 TAMIL_HINT = (" If you write Tamil, use correct standard spelling and proper school maths terms "
               "(e.g. வடிவொத்த முக்கோணங்கள், தொடுகோடு, நேர்மாறுபாடு, எதிர்மாறுபாடு). Never put symbols like • inside words.")
 LANG_HINT = ' "language" is the ISO 639-1 code of your reply (e.g. ta, en, hi).'
@@ -334,6 +334,10 @@ TA_LETTERS = dict(zip("abcdefghijklmnopqrstuvwxyz", [
     "ஏ", "பி", "சி", "டி", "இ", "எஃப்", "ஜி", "எச்", "ஐ", "ஜே", "கே", "எல்", "எம்",
     "என்", "ஓ", "பீ", "கியூ", "ஆர்", "எஸ்", "டீ", "யூ", "வி", "டபிள்யூ", "எக்ஸ்", "வை", "இசட்"]))
 
+EN_LETTERS = dict(zip("abcdefghijklmnopqrstuvwxyz", [
+    "ay", "bee", "see", "dee", "ee", "eff", "gee", "aitch", "eye", "jay", "kay", "el", "em",
+    "en", "oh", "pee", "cue", "are", "ess", "tee", "you", "vee", "double you", "ex", "why", "zee"]))
+
 _VAR = r"(?<![A-Za-z])[A-Za-z](?![A-Za-z])"
 _LEFT = rf"(?:{_VAR}|\d[A-Za-z]{{1,3}}(?![A-Za-z])|\d|\)|π|ரூபாய்|रुपये|rupees)(?:\^\(?-?\w+\)?|[²³])?"
 # right operand: number, "(", √, π, or a lone letter that is not an article ("a great deal")
@@ -362,10 +366,24 @@ def math_speech(text, native):
     text = re.sub(r"\^\s*3(?!\d)|³", f" {w['cube']} ", text)
     text = re.sub(r"\^\s*\(?\s*(-?[\w.]+)\s*\)?", lambda m: f" {w['pow']} {m.group(1)} ", text)
     text = re.sub(rf"(?<![\w)])[-−](?=\d|\(|{_VAR})", f" {w['minus']} ", text)   # negative numbers: -5
-    if native == "ta" and mathy:
-        text = re.sub(r"(?<![A-Za-z/])[A-Za-z](?![A-Za-z/])", lambda m: f" {TA_LETTERS[m.group(0).lower()]} ", text)
-        text = re.sub(r"(?<=\d)([A-Za-z]{1,3})(?![A-Za-z])",
-                      lambda m: " " + " ".join(TA_LETTERS[c.lower()] for c in m.group(1)) + " ", text)  # 2ab
+    if mathy:  # say variables by letter name (a -> "ay", b -> "bee"), only next to maths words/digits/brackets
+        names = TA_LETTERS if native == "ta" else EN_LETTERS
+        cues = tuple(w[k] for k in ("plus", "minus", "times", "div", "eq", "ne", "lt", "gt", "le", "ge",
+                                    "sq", "cube", "pow", "root", "pi"))
+        def near(before, after):
+            return (bool(before) and (before[-1] in "()0123456789" or before.endswith(cues))) or \
+                   (bool(after) and (after[0] in "()0123456789" or after.startswith(cues)))
+        src = text
+        text = re.sub(r"(?<![A-Za-z/])[A-Za-z](?![A-Za-z/])",
+                      lambda m: f" {names[m.group(0).lower()]} "
+                      if near(src[:m.start()].rstrip(), src[m.end():].lstrip()) else m.group(0), src)
+        src = text
+        def product(m):   # 2ab -> 2 ay bee
+            after = src[m.end():].lstrip()
+            if m.group(1).lower() in ("st", "nd", "rd", "th"): return m.group(0)
+            if after and not (after[0] in "().,;:!?" or after.startswith(cues)): return m.group(0)
+            return " " + " ".join(names[c.lower()] for c in m.group(1)) + " "
+        text = re.sub(r"(?<=\d)([A-Za-z]{1,3})(?![A-Za-z])", product, text)
     text = re.sub(r"(வரை|तक)(\s+\1)+", r"\1", text)   # text already said "வரை"/"तक"
     return re.sub(r"[ \t]{2,}", " ", text)
 
@@ -373,6 +391,8 @@ def speech_text(text, lang):
     """Make text safe for TTS: remove URLs, 1,000 -> 1000, 19.11.2026 -> 19 11 2026,
     Rs / ₹ / INR / ரூ -> rupees word, and maths symbols (+ - × ÷ = ^ √ π ...) -> spoken words."""
     text = re.sub(r"https?://\S+|www\.\S+", " ", text)
+    text = re.sub(r"([^\s.!?।,;:])[ \t]*\n+[ \t]*", r"\1. ", text)   # a new line = a pause
+    text = re.sub(r"\s*\n+\s*", " ", text)
     native = None if is_latin_text(text) else guess_lang(text)
     word = RUPEE_WORDS.get(native, "rupees")
     text = re.sub(r"(?<=\d),(?=\d)", "", text)
@@ -695,6 +715,20 @@ def route_result(sender, result, lang, user_text=""):
     else:
         send_reply(sender, result.get("reply") or "", lang)
 
+_FORMULA_OK = re.compile(r"^[A-Za-z0-9\s•·+\-−–×÷*/=^<>≤≥≠²³()\[\].,π√%]+$")
+
+def is_formula_text(t):
+    """True when the whole message is just formulas (e.g. '(a + b)² = a² + 2ab + b²')."""
+    t = (t or "").strip()
+    lines = [l for l in t.splitlines() if l.strip()]
+    if not lines or "=" not in t or t.endswith(("=", "?")): return False
+    if re.search(r"[A-Za-z]{4,}", t): return False          # real words -> a normal question
+    return all(_FORMULA_OK.match(l) and re.search(r"[=+\-−–×÷*/^²³√π]", l) for l in lines)
+
+def formula_lines(t):
+    return "\n".join(re.sub(r"^[ \t]*(?:[•·*]|-\s)\s*", "", l).strip() for l in t.splitlines() if l.strip())
+
+
 def handle_text(sender, message):
     user_text = message.get("text", {}).get("body", "").strip()
     if not user_text: return
@@ -707,6 +741,10 @@ def handle_text(sender, message):
             except Exception as e: log.warning(f"voice failed: {e}")
         else:
             safe_send_text(sender, MSG["img_fail"])
+        return
+
+    if is_formula_text(user_text):   # read the formulas back completely, text + voice
+        send_reply(sender, formula_lines(user_text), "en")
         return
 
     result, lang = ask_with_lang(TEXT_PROMPT + user_text, SYSTEM_PROMPT + " Reply with JSON only.")
