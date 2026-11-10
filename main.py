@@ -26,7 +26,11 @@ from gtts.lang import tts_langs
 from google import genai
 from google.genai import types
 from docx import Document
+import asyncio
+import edge_tts
 
+
+# asyncio.run(tamil_super_voice("a² + b² = c²"))
 # ---------- CONFIG ----------
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
@@ -160,6 +164,12 @@ def _script_of(ch):
     for script,_ in _SCRIPT_LANG:
         if name.startswith(script): return script
     return "LATIN" if name.startswith("LATIN") else None
+
+async def tamil_super_voice(text):
+    enhanced = enhance_maths_voice(text)
+    communicate = edge_tts.Communicate(enhanced, "ta-IN-PallaviNeural")
+    await communicate.save("super_tamil.mp3")
+
 def guess_lang(text):
     counts = {}
     for ch in text or "":
