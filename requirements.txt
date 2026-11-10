@@ -6,3 +6,4 @@ pillow
 gtts
 google-genai
 python-docx
+edge_tts
