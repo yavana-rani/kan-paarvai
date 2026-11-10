@@ -5,12 +5,14 @@ import hmac
 import hashlib
 import logging
 import tempfile
+import asyncio
 import threading
 import time
 import unicodedata
 import html as htmllib
 from html.parser import HTMLParser
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -26,11 +28,12 @@ from gtts.lang import tts_langs
 from google import genai
 from google.genai import types
 from docx import Document
-import asyncio
-import edge_tts
 
+try:
+    import edge_tts          # natural neural voices; gTTS is used if this is missing or fails
+except ImportError:
+    edge_tts = None
 
-# asyncio.run(tamil_super_voice("a² + b² = c²"))
 # ---------- CONFIG ----------
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN", "")
@@ -49,6 +52,8 @@ MAX_PDF_IMAGE_PAGES = 5
 MAX_PDF_TEXT_CHARS = 15000
 MAX_VOICE_CHARS = 1200
 MAX_VOICE_SEGMENTS = 25
+TTS_ENGINE = os.getenv("TTS_ENGINE", "edge").lower()          # "edge" (neural) or "gtts"
+EDGE_VOICE_OVERRIDES = json.loads(os.getenv("EDGE_VOICES", "{}") or "{}")   # e.g. {"ta": "ta-IN-ValluvarNeural"}
 FONT_DIR = str(Path(__file__).resolve().parent / "fonts")
 Path(FONT_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -164,12 +169,6 @@ def _script_of(ch):
     for script,_ in _SCRIPT_LANG:
         if name.startswith(script): return script
     return "LATIN" if name.startswith("LATIN") else None
-
-async def tamil_super_voice(text):
-    enhanced = enhance_maths_voice(text)
-    communicate = edge_tts.Communicate(enhanced, "ta-IN-PallaviNeural")
-    await communicate.save("super_tamil.mp3")
-
 def guess_lang(text):
     counts = {}
     for ch in text or "":
@@ -397,6 +396,41 @@ def math_speech(text, native):
     text = re.sub(r"(வரை|तक)(\s+\1)+", r"\1", text)   # text already said "வரை"/"तक"
     return re.sub(r"[ \t]{2,}", " ", text)
 
+AND_WORDS = {"ta": "மற்றும்", "hi": "और"}
+CURRENCY_WORDS = {
+    "$": {"en": "dollars", "ta": "டாலர்", "hi": "डॉलर"},
+    "€": {"en": "euros", "ta": "யூரோ", "hi": "यूरो"},
+    "£": {"en": "pounds", "ta": "பவுண்டு", "hi": "पाउंड"},
+}
+UNIT_WORDS = {   # unit -> {language: spoken form}
+    "km/h": {"en": "kilometres per hour", "ta": "கிலோமீட்டர் பெர் ஹவர்", "hi": "किलोमीटर प्रति घंटा"},
+    "km": {"en": "kilometres", "ta": "கிலோமீட்டர்", "hi": "किलोमीटर"},
+    "kg": {"en": "kilograms", "ta": "கிலோகிராம்", "hi": "किलोग्राम"},
+    "mg": {"en": "milligrams", "ta": "மில்லிகிராம்", "hi": "मिलीग्राम"},
+    "cm": {"en": "centimetres", "ta": "சென்டிமீட்டர்", "hi": "सेंटीमीटर"},
+    "mm": {"en": "millimetres", "ta": "மில்லிமீட்டர்", "hi": "मिलीमीटर"},
+    "ml": {"en": "millilitres", "ta": "மில்லிலிட்டர்", "hi": "मिलीलीटर"},
+    "°c": {"en": "degrees Celsius", "ta": "டிகிரி செல்சியஸ்", "hi": "डिग्री सेल्सियस"},
+    "°f": {"en": "degrees Fahrenheit", "ta": "டிகிரி பாரன்ஹீட்", "hi": "डिग्री फ़ारेनहाइट"},
+}
+
+def speech_normalize(text, native):
+    """Say symbols, units and abbreviations the way a person would, in the reply's language."""
+    lang = native if native in ("ta", "hi") else "en"
+    num = r"\d+(?:\.\d+)?"
+    for sym, words in CURRENCY_WORDS.items():
+        text = re.sub(rf"{re.escape(sym)}\s*({num})", rf"\1 {words[lang]}", text)
+        text = text.replace(sym, f" {words[lang]} ")
+    text = re.sub(r"(?<=\d)\s*(km/h|kmph)(?![A-Za-z])", f" {UNIT_WORDS['km/h'][lang]}", text, flags=re.I)
+    text = re.sub(r"(?<=\d)\s*(km|kg|mg|cm|mm|ml)(?![A-Za-z])",
+                  lambda m: f" {UNIT_WORDS[m.group(1).lower()][lang]}", text, flags=re.I)
+    text = re.sub(r"(?<=\d)\s*°\s*([CF])\b", lambda m: f" {UNIT_WORDS['°' + m.group(1).lower()][lang]}", text)
+    for pat, word in ((r"\bDr\.", "Doctor"), (r"\bMr\.", "Mister"), (r"\bMrs\.", "Missus"),
+                      (r"\betc\.", "et cetera"), (r"\be\.g\.", "for example"), (r"\bi\.e\.", "that is"),
+                      (r"\bvs\.?(?=\s)", "versus")):
+        text = re.sub(pat, word, text)
+    return text.replace("&", f" {AND_WORDS.get(native, 'and')} ")
+
 def speech_text(text, lang):
     """Make text safe for TTS: remove URLs, 1,000 -> 1000, 19.11.2026 -> 19 11 2026,
     Rs / ₹ / INR / ரூ -> rupees word, and maths symbols (+ - × ÷ = ^ √ π ...) -> spoken words."""
@@ -411,7 +445,7 @@ def speech_text(text, lang):
     text = re.sub(rf"(?:₹|\bRs\.?|\bINR|ரூ\.?)\s*({num})", rf"\1 {word}", text, flags=re.I)
     text = re.sub(rf"({num})\s*(?:₹|/-|Rs\.?(?!\w)|INR(?!\w))", rf"\1 {word}", text, flags=re.I)
     text = re.sub(r"₹|\bRs\.?(?!\w)|\bINR\b", word, text, flags=re.I)
-    return math_speech(text, native)
+    return math_speech(speech_normalize(text, native), native)
 
 def _split_runs(text):
     """Split into runs of Latin / non-Latin letters so each run gets the right voice."""
@@ -458,18 +492,72 @@ def _voice_pieces(text, lang):
             if re.search(r"\w", chunk): pieces.append((chunk, vlang))
     return pieces[:MAX_VOICE_SEGMENTS]
 
-def send_voice(to, text, lang):
-    text = clean_for_speech(_EMOJI.sub("", clean_text(text)))[:MAX_VOICE_CHARS].strip()
-    pieces = _voice_pieces(speech_text(text, lang), lang)
-    if not pieces: return
+EDGE_VOICES = {   # language code -> Microsoft neural voice (override with the EDGE_VOICES env setting)
+    "ta": "ta-IN-PallaviNeural", "en": "en-IN-NeerjaNeural", "hi": "hi-IN-SwaraNeural",
+    "te": "te-IN-ShrutiNeural", "ml": "ml-IN-SobhanaNeural", "kn": "kn-IN-SapnaNeural",
+    "bn": "bn-IN-TanishaaNeural", "mr": "mr-IN-AarohiNeural", "gu": "gu-IN-DhwaniNeural",
+    "ur": "ur-IN-GulNeural", "ar": "ar-SA-ZariyahNeural", "fr": "fr-FR-DeniseNeural",
+    "es": "es-ES-ElviraNeural", "de": "de-DE-KatjaNeural", "pt": "pt-BR-FranciscaNeural",
+    "it": "it-IT-ElsaNeural", "ru": "ru-RU-SvetlanaNeural", "ja": "ja-JP-NanamiNeural",
+    "ko": "ko-KR-SunHiNeural", "zh": "zh-CN-XiaoxiaoNeural", "id": "id-ID-GadisNeural",
+    "tr": "tr-TR-EmelNeural", "th": "th-TH-PremwadeeNeural", "vi": "vi-VN-HoaiMyNeural",
+    "he": "he-IL-HilaNeural", "ne": "ne-NP-HemkalaNeural", "si": "si-LK-ThiliniNeural",
+}
+
+def edge_voice(lang):
+    return EDGE_VOICE_OVERRIDES.get(lang) or EDGE_VOICES.get(lang)
+
+async def _edge_bytes(text, voice, rate="+0%"):
+    out = bytearray()
+    async for chunk in edge_tts.Communicate(text, voice, rate=rate).stream():
+        if chunk["type"] == "audio": out += chunk["data"]
+    if not out: raise RuntimeError("edge-tts returned no audio")
+    return bytes(out)
+
+def _synth_edge(pieces, rate="+0%"):
+    """All pieces with neural voices (4 at a time, order kept). Raises if any piece can't be made."""
+    voices = [edge_voice(l) for _, l in pieces]
+    if not all(voices): raise RuntimeError("no neural voice for a piece")
+    async def run():
+        sem = asyncio.Semaphore(4)
+        async def one(chunk, voice):
+            async with sem: return await _edge_bytes(chunk, voice, rate)
+        return await asyncio.gather(*(one(c, v) for (c, _), v in zip(pieces, voices)))
+    with ThreadPoolExecutor(max_workers=1) as ex:   # own thread = own event loop, safe anywhere
+        return b"".join(ex.submit(asyncio.run, run()).result(timeout=120))
+
+def _synth_gtts(pieces):
     audio = BytesIO()
     for chunk, vlang in pieces:
         kw = {"tld": "co.in"} if vlang == "en" else {}
         gTTS(text=chunk, lang=vlang, **kw).write_to_fp(audio)
+    return audio.getvalue()
+
+def enhance_maths_voice(text, lang="ta"):
+    """Spelling + maths/pronunciation clean-up for speech."""
+    return speech_text(clean_for_speech(text), lang)
+
+async def tamil_super_voice(text, path="super_tamil.mp3", lang="ta"):
+    """Standalone helper: speak text with the Tamil neural voice and save an mp3."""
+    pieces = _voice_pieces(enhance_maths_voice(text, lang), lang)
+    audio = b"".join([await _edge_bytes(c, edge_voice(l), "-10%") for c, l in pieces])
+    Path(path).write_bytes(audio)
+    return path
+
+def send_voice(to, text, lang):
+    text = clean_for_speech(_EMOJI.sub("", clean_text(text)))[:MAX_VOICE_CHARS].strip()
+    pieces = _voice_pieces(speech_text(text, lang), lang)
+    if not pieces: return
+    audio = None
+    if edge_tts and TTS_ENGINE == "edge":
+        slow = "-10%" if re.search(r"[=+×÷^√π≤≥≠²³]", text) else "+0%"   # formulas a little slower = clearer
+        try: audio = _synth_edge(pieces, slow)
+        except Exception as e: log.warning(f"neural voice failed, using gTTS: {e}")
+    if audio is None: audio = _synth_gtts(pieces)
     fd, path = tempfile.mkstemp(suffix=".mp3")
     try:
         os.close(fd)
-        with open(path, "wb") as f: f.write(audio.getvalue())
+        with open(path, "wb") as f: f.write(audio)
         mid = upload_media(path, "audio/mpeg")
         graph_post("messages", {"messaging_product":"whatsapp","to":to,"type":"audio","audio":{"id":mid}})
     finally:
