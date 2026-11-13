@@ -51,7 +51,7 @@ DEFAULT_LANG = os.getenv("DEFAULT_LANG", "ta")
 LOCAL_TZ = os.getenv("LOCAL_TZ", "Asia/Kolkata")
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
 MAX_PDF_IMAGE_PAGES = 5
-MAX_PDF_TEXT_CHARS = 15000
+MAX_PDF_TEXT_CHARS = 40000   # longer texts keep their START and END (see fit_text)
 MAX_VOICE_CHARS = 1200
 MAX_VOICE_SEGMENTS = 25
 TTS_ENGINE = os.getenv("TTS_ENGINE", "edge").lower()          # "edge" (neural) or "gtts"
@@ -80,7 +80,7 @@ SYSTEM_PROMPT = f"You are Kan Paarvai AI, a helpful WhatsApp assistant. Always r
 TEXT_PROMPT = """You ARE ABLE to generate images. NEVER say "I cannot generate images". If user asks for an image, you MUST return kind="image".
 Read the user's message and reply with ONLY one JSON object, no markdown fences:
 {
- "language": "", "kind": "chat" or "document" or "image", "reply": "", "image_prompt": "",
+ "language": "", "kind": "chat" or "document" or "image" or "more" or "repeat", "reply": "", "image_prompt": "",
  "doc_type": "", "sender_name": "", "sender_address": "", "recipient_title": "", "recipient_address": "",
  "date": "", "subject": "", "salutation": "", "body": "", "closing": "", "signature_name": "",
  "labels": {"from": "", "to": "", "date": "", "subject": ""}, "ready_message": ""
@@ -88,28 +88,43 @@ Read the user's message and reply with ONLY one JSON object, no markdown fences:
 Rules:
 - "language" is the ISO 639-1 code of the user's language (e.g. ta, en, hi).
 - kind is "image" if user asks to create, generate, draw an image, picture, photo, logo, poster, greeting card.
+- kind is "more" if the user only asks to hear more details of the last summary; kind is "repeat" if the user only asks to hear the last reply again.
 - For "image": put detailed ENGLISH prompt in "image_prompt" and acknowledgement in "reply" in user's language.
 - For "document": fill document fields.
 - For "chat": put answer in "reply".
 """ + STYLE_RULES + "\n\nUser message:\n"
 
-MEDIA_PROMPT = """Reply with ONLY one JSON object: {"language": "", "reply": ""} Answer in caption language, otherwise '""" + DEFAULT_LANG + """'. """ + STYLE_RULES + LANG_HINT + TAMIL_HINT + " "
+CRISP_RULES = (
+    ' "reply" is a CRISP summary for a listener with low vision: at most 5 short sentences. '
+    "Sentence 1 says what this is (type of picture or document) in one short sentence. "
+    "The next 2-4 sentences give the most important points, most important first. "
+    "NEVER leave out a critical detail if it is present: amounts, dates, deadlines, times, names, phone numbers, "
+    "addresses, warnings, medicine names and doses, and what the person must do. "
+    '"more" holds every other useful detail (up to 10 short sentences) so that nothing is lost. '
+    "Plain words only; no markdown, bullets or symbols. If something is unreadable or unclear, say so honestly instead of guessing. "
+    'If the text contains "[... middle of the document omitted ...]", or only sample pages are given, say so in one short sentence.'
+)
+
+MEDIA_PROMPT = ('Reply with ONLY one JSON object: {"language": "", "reply": "", "more": ""} '
+                "Answer in caption language, otherwise '" + DEFAULT_LANG + "'." + CRISP_RULES + " "
+                + STYLE_RULES + LANG_HINT + TAMIL_HINT + " ")
 
 VOICE_PROMPT = 'Reply with ONLY one JSON object: {"language": "", "reply": ""} Listen to the audio and answer it in the same language the speaker used. ' + STYLE_RULES + LANG_HINT
 
 IMAGE_PROMPT = MEDIA_PROMPT + (
-    "Task: look at the image and explain in 3-5 short lines what is in it: the main subject, "
-    "important details, and any visible text (read it briefly). If the caption asks a question, answer it instead."
+    "Task: look at the image. Say what it is (photo, sign, bill, medicine strip, form, screenshot...) and the key visible "
+    "content: readable text, numbers, signs and what is happening. Describe people neutrally; do not name real people. "
+    "If the caption asks a question, answer it first."
 )
 
 DOC_PROMPT = MEDIA_PROMPT + (
-    "Task: explain in 4-6 short lines what this document contains: what kind of document it is, "
-    "the main topics, and the key points or numbers. If the caption asks a question, answer it too."
+    "Task: summarise this document. Say what kind of document it is, then its key points. "
+    "If the caption asks a question, answer it first."
 )
 
 HTML_PROMPT = MEDIA_PROMPT + (
-    "Task: this is a web page (HTML file). Explain in 4-6 short lines what it contains: what the page is about "
-    "or does, its main sections, and the key points. Do not show code. If the caption asks a question, answer it too."
+    "Task: this is a web page (HTML file). Say what the page is about or does, then its key points. "
+    "Do not show code. If the caption asks a question, answer it first."
 )
 
 MSG = {
@@ -119,6 +134,8 @@ MSG = {
     "type": "Please send text, voice, image, PDF, Word or HTML files (Text, voice, image, PDF, Word, HTML file mattum anuppunga pa)",
     "pdf_fail": "Sorry, the PDF could not be created. Please try again later.",
     "img_fail": "Sorry, image could not be created. Please try again later (Image create panna mudiyala pa)",
+    "nomore": "மேலும் சொல்ல விவரம் எதுவும் இல்லை. முதலில் ஒரு படம் அல்லது கோப்பை அனுப்புங்கள்.",
+    "norepeat": "மீண்டும் சொல்ல எதுவும் இல்லை.",
     "limit": "Today's free limit for this is over. Please try again tomorrow 🙏 (Inniku limit mudinjiduchu, naalaikku muyarchikavum pa)",
     "deleted": "Done ✅ Your saved data is deleted (Ungal data ellam delete aayiduchu pa)",
 }
@@ -256,8 +273,10 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users(wa_id TEXT PRIMARY KEY, lang TEXT, first_seen TEXT, last_seen TEXT);
             CREATE TABLE IF NOT EXISTS usage(who TEXT, day TEXT, kind TEXT, n INTEGER, PRIMARY KEY(who, day, kind));
             CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY AUTOINCREMENT, wa_id TEXT, ts REAL, role TEXT, text TEXT);
+            CREATE TABLE IF NOT EXISTS last_reply(wa_id TEXT PRIMARY KEY, ts REAL, lang TEXT, reply TEXT, more TEXT);
         """)
         con.execute("DELETE FROM history WHERE ts < ?", (time.time() - HISTORY_HOURS * 3600,))
+        con.execute("DELETE FROM last_reply WHERE ts < ?", (time.time() - HISTORY_HOURS * 3600,))
         con.execute("DELETE FROM usage WHERE day < ?", (_today(),))
 
 @_safe(False)
@@ -312,9 +331,25 @@ def history_context(wa_id):
     return "\n".join(parts) + "\n\n" if parts else ""
 
 @_safe(None)
+def save_last(wa_id, reply, more, lang):
+    """Keep the latest reply and its extra details for 24 h, so the user can ask for 'more' or 'repeat'."""
+    with _db_lock, _db() as con, con:
+        con.execute("INSERT INTO last_reply(wa_id, ts, lang, reply, more) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(wa_id) DO UPDATE SET ts=excluded.ts, lang=excluded.lang, reply=excluded.reply, more=excluded.more",
+                    (wa_id, time.time(), base_lang(lang), (reply or "")[:3500], (more or "")[:3500]))
+
+@_safe(None)
+def load_last(wa_id):
+    cutoff = time.time() - HISTORY_HOURS * 3600
+    with _db_lock, _db() as con:
+        row = con.execute("SELECT lang, reply, more FROM last_reply WHERE wa_id=? AND ts>=?", (wa_id, cutoff)).fetchone()
+    return {"lang": row[0], "reply": row[1], "more": row[2]} if row else None
+
+@_safe(None)
 def delete_user_data(wa_id):
     with _db_lock, _db() as con, con:
         con.execute("DELETE FROM history WHERE wa_id=?", (wa_id,))
+        con.execute("DELETE FROM last_reply WHERE wa_id=?", (wa_id,))
         con.execute("DELETE FROM users WHERE wa_id=?", (wa_id,))
 
 init_db()
@@ -349,6 +384,7 @@ def ask_with_lang(contents, system):
         if len(base_lang(lang)) not in (2, 3): lang = ""
         if data.get("kind") not in ("document",):
             data["reply"] = clean_text(data.get("reply")) if data.get("reply") else data.get("reply")
+        if data.get("more"): data["more"] = clean_text(str(data["more"]))
         lang = lang or guess_lang(data.get("reply") or data.get("image_prompt") or data.get("body") or "")
         return data, (lang or DEFAULT_LANG)
     except Exception:
@@ -645,8 +681,30 @@ async def tamil_super_voice(text, path="super_tamil.mp3", lang="ta"):
     Path(path).write_bytes(audio)
     return path
 
+MAX_VOICE_PARTS = 3
+VOICE_MORE_NOTE = {"ta": "மீதமுள்ள விவரங்கள் எழுத்தில் உள்ளன.",
+                   "hi": "बाकी जानकारी संदेश में लिखी है।",
+                   "en": "The rest is in the text message."}
+
+def _voice_parts(text, lang):
+    """Long text is spoken in up to 3 voice messages cut at sentence ends (nothing silently dropped);
+    if even that is not enough, the last part says the rest is in the text message."""
+    parts, rest = [], (text or "").strip()
+    while rest and len(parts) < MAX_VOICE_PARTS:
+        if len(rest) <= MAX_VOICE_CHARS:
+            parts.append(rest); rest = ""; break
+        cut = max(rest.rfind(c, 0, MAX_VOICE_CHARS) for c in ".!?।\n")
+        cut = cut + 1 if cut > MAX_VOICE_CHARS * 0.5 else MAX_VOICE_CHARS
+        parts.append(rest[:cut].strip()); rest = rest[cut:].strip()
+    if rest and parts: parts[-1] += " " + VOICE_MORE_NOTE.get(base_lang(lang), VOICE_MORE_NOTE["en"])
+    return parts
+
 def send_voice(to, text, lang):
-    text = clean_for_speech(_EMOJI.sub("", clean_text(text)))[:MAX_VOICE_CHARS].strip()
+    text = clean_for_speech(_EMOJI.sub("", clean_text(text))).strip()
+    for part in _voice_parts(text, lang):
+        _send_voice_one(to, part, lang)
+
+def _send_voice_one(to, text, lang):
     pieces = _voice_pieces(speech_text(text, lang), lang)
     if not pieces: return
     audio = None
@@ -664,12 +722,90 @@ def send_voice(to, text, lang):
     finally:
         if os.path.exists(path): os.remove(path)
 
-def send_reply(to, text, lang):
+def send_reply(to, text, lang, save=True):
     """Text first, then a voice copy. Voice failure never blocks the text."""
     text = correct_tamil_maths_spelling((text or "").strip()) or MSG["retry"]
     send_text(to, text)
+    if save: save_last(to, text, "", lang)          # lets the user say "repeat"
     try: send_voice(to, text, lang)
     except Exception as e: log.warning(f"voice failed: {e}")
+
+
+# ---------- CRISP SUMMARIES (short first, nothing lost) ----------
+MAX_CRISP_SENTENCES = 5
+MAX_CRISP_CHARS = 600
+MORE_HINT = {"ta": "மேலும் விவரம் வேண்டுமெனில் “மேலும்” என்று அனுப்புங்கள் அல்லது சொல்லுங்கள்.",
+             "hi": "और जानकारी के लिए “और” भेजें।",
+             "en": "For more details, say “more”."}
+FACTS_LABEL = {"ta": "கூடுதல் முக்கிய எண்கள் மற்றும் தேதிகள்: ",
+               "hi": "अन्य महत्वपूर्ण संख्याएँ और तारीखें: ",
+               "en": "Other important numbers and dates: "}
+MORE_WORDS = {"more", "details", "detail", "more details", "tell me more", "மேலும்", "மேலும் சொல்", "விவரம்", "விவரங்கள்", "और", "विवरण"}
+REPEAT_WORDS = {"repeat", "again", "say again", "repeat that", "மீண்டும்", "மீண்டும் சொல்", "மறுபடியும்", "दोहराओ", "फिर से"}
+
+_SENT_SPLIT = (r"(?<=[.!?।])(?<!\bRs\.)(?<!\bDr\.)(?<!\bMr\.)(?<!\bMrs\.)(?<!\bMs\.)(?<!\bNo\.)(?<!\bSt\.)"
+               r"(?<!\be\.g\.)(?<!\bi\.e\.)(?<!ரூ\.)\s+|\n+")
+
+def split_crisp(reply, more=""):
+    """Keep the summary short. Anything cut from it moves to 'more', so nothing is lost."""
+    parts = [p.strip() for p in re.split(_SENT_SPLIT, (reply or "").strip()) if p and p.strip()]
+    keep, rest, total = [], [], 0
+    for p in parts:
+        if not keep or (len(keep) < MAX_CRISP_SENTENCES and total + len(p) <= MAX_CRISP_CHARS):
+            keep.append(p); total += len(p)
+        else:
+            rest.append(p)
+    extra = "\n".join(rest + ([str(more).strip()] if (more or "").strip() else []))
+    return "\n".join(keep), extra.strip()
+
+_FACT_PATTERNS = (
+    r"(?:₹|\bRs\.?|\bINR|ரூ\.?)\s*\d[\d,]*(?:\.\d+)?",       # amounts
+    r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b",                    # dates
+    r"\b\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?",                      # times
+    r"(?<![\d.])(?:\+?91[ -]?)?[6-9]\d{9}(?!\d)",              # mobile numbers
+)
+def _digits(s): return re.sub(r"\D", "", s or "")
+
+def missing_facts(source, *covered, limit=8):
+    """Amounts, dates, times and phone numbers found in the source but not mentioned in the summary."""
+    blob = _digits(" ".join(c or "" for c in covered))
+    out, seen = [], set()
+    for pat in _FACT_PATTERNS:
+        for m in re.finditer(pat, source or ""):
+            f = m.group(0).strip()
+            d = _digits(f)
+            if len(d) < 2 or d in seen: continue
+            seen.add(d)
+            if d not in blob: out.append(f)
+    return out[:limit]
+
+def add_missing_facts(source, reply, more, lang):
+    extra = missing_facts(source, reply, more)
+    if not extra: return more
+    label = FACTS_LABEL.get(base_lang(lang), FACTS_LABEL["en"])
+    return ((more + "\n") if more else "") + label + ", ".join(extra) + "."
+
+def send_summary(sender, header, result, lang, source=""):
+    """Crisp summary first (text + voice). The rest is kept for 'more'; key numbers are never dropped."""
+    reply, more = split_crisp(result.get("reply") or "", result.get("more") or "")
+    if source: more = add_missing_facts(source, reply, more, lang)
+    body = reply or MSG["retry"]
+    if more: body += "\n" + MORE_HINT.get(base_lang(lang), MORE_HINT["en"])
+    text = f"{header}\n\n{body}" if header else body
+    send_reply(sender, text, lang)
+    save_last(sender, text, more, lang)
+
+def send_more(sender):
+    last = load_last(sender)
+    if not last or not last.get("more"):
+        safe_send_text(sender, MSG["nomore"]); return
+    send_reply(sender, last["more"], last["lang"], save=False)
+
+def send_repeat(sender):
+    last = load_last(sender)
+    if not last or not last.get("reply"):
+        safe_send_text(sender, MSG["norepeat"]); return
+    send_reply(sender, last["reply"], last["lang"], save=False)
 
 
 # ---------- IMAGE GENERATION ----------
@@ -722,13 +858,20 @@ def explain_image(sender, data, caption):
     jpeg = prepare_image(data)
     part = types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")
     result, lang = ask_with_lang([part, f"Caption: {caption}" if caption else "No caption."], IMAGE_PROMPT)
-    send_reply(sender, result.get("reply") or MSG["retry"], lang)
+    send_summary(sender, "", result, lang)
 
 
 # ---------- READ PDF / WORD ----------
 def _sample_pages(pages, n):
     if pages <= n: return list(range(pages))
     return sorted({round(i * (pages - 1) / (n - 1)) for i in range(n)})
+
+def fit_text(text, limit=None):
+    """Keep the start AND the end of a long text: deadlines, amounts and signatures are often at the end."""
+    limit = limit or MAX_PDF_TEXT_CHARS
+    if len(text) <= limit: return text
+    head = int(limit * 0.6)
+    return text[:head] + "\n[... middle of the document omitted ...]\n" + text[-(limit - head):]
 
 def read_pdf(data):
     """Returns (page_count, text, image_parts). Scanned or garbled PDFs are read from page images."""
@@ -738,7 +881,7 @@ def read_pdf(data):
         pages = doc.page_count
         text = "\n".join(p.get_text() for p in doc).strip()
         if len(re.sub(r"\s+", "", text)) >= 50 and not looks_garbled(text):
-            return pages, text[:MAX_PDF_TEXT_CHARS], []
+            return pages, fit_text(text), []
         parts = []
         for i in _sample_pages(pages, MAX_PDF_IMAGE_PAGES):   # spread across the file, not just the first pages
             pix = doc[i].get_pixmap(matrix=fitz.Matrix(2, 2))
@@ -757,7 +900,7 @@ def read_docx(data):
             if cells: lines.append(" | ".join(cells))
     text = "\n".join(lines).strip()
     if not text: raise EmptyFile()
-    return text[:MAX_PDF_TEXT_CHARS]
+    return fit_text(text)
 
 def explain_pdf(sender, data, filename, caption):
     pages, text, image_parts = read_pdf(data)
@@ -766,12 +909,12 @@ def explain_pdf(sender, data, filename, caption):
     contents = list(contents) + [f"Caption: {caption}" if caption else "No caption."]
     result, lang = ask_with_lang(contents, DOC_PROMPT)
     header = f"📄 {filename} ({pages} page{'s' if pages != 1 else ''})"
-    send_reply(sender, f"{header}\n\n{result.get('reply') or MSG['retry']}", lang)
+    send_summary(sender, header, result, lang, source=text)
 
 def explain_docx(sender, data, filename, caption):
     text = read_docx(data)
     result, lang = ask_with_lang([f"Document text:\n{text}", f"Caption: {caption}" if caption else "No caption."], DOC_PROMPT)
-    send_reply(sender, f"📝 {filename}\n\n{result.get('reply') or MSG['retry']}", lang)
+    send_summary(sender, f"📝 {filename}", result, lang, source=text)
 
 
 # ---------- READ HTML ----------
@@ -832,12 +975,12 @@ def read_html(data):
     return (f"Title: {title or '-'}\n"
             f"Headings: {' | '.join(p.headings[:15]) or '-'}\n"
             f"Links: {p.links}, Images: {p.images}, Forms: {p.forms}, Scripts: {p.scripts}\n\n"
-            f"Visible text:\n{body[:MAX_PDF_TEXT_CHARS] or '(none - the page is built by scripts)'}")
+            f"Visible text:\n{fit_text(body) or '(none - the page is built by scripts)'}")
 
 def explain_html(sender, data, filename, caption):
     info = read_html(data)
     result, lang = ask_with_lang([f"HTML page summary:\n{info}", f"Caption: {caption}" if caption else "No caption."], HTML_PROMPT)
-    send_reply(sender, f"🌐 {filename}\n\n{result.get('reply') or MSG['retry']}", lang)
+    send_summary(sender, f"🌐 {filename}", result, lang, source=info)
 
 
 # ---------- CREATE LETTER PDF ----------
@@ -951,6 +1094,10 @@ def route_result(sender, result, lang, user_text=""):
         else: safe_send_text(sender, MSG["img_fail"])
     elif kind == "document":
         send_letter(sender, result, lang)
+    elif kind == "more":
+        send_more(sender)
+    elif kind == "repeat":
+        send_repeat(sender)
     else:
         reply = result.get("reply") or ""
         send_reply(sender, reply, lang)
@@ -973,9 +1120,13 @@ def formula_lines(t):
 def handle_text(sender, message):
     user_text = message.get("text", {}).get("body", "").strip()
     if not user_text: return
-    cmd = user_text.lower().strip().lstrip("/")
+    cmd = user_text.lower().strip().strip(" .!?।").lstrip("/")
     if cmd in ("menu", "help", "start"):
         send_menu(sender); return
+    if cmd in MORE_WORDS:
+        send_more(sender); return
+    if cmd in REPEAT_WORDS:
+        send_repeat(sender); return
     if cmd in ("delete my data", "delete data", "delete"):
         delete_user_data(sender); safe_send_text(sender, MSG["deleted"]); return
     if wants_image(user_text.lower()):
@@ -1061,7 +1212,7 @@ def process_message(sender, message, message_id):
 
 
 # ---------- PRIVACY POLICY (served at /privacy) ----------
-PRIVACY_UPDATED = "November 10, 2026"
+PRIVACY_UPDATED = "November 13, 2026"
 _PRIVACY_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1085,7 +1236,7 @@ p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}
 <li><b>Your phone number and WhatsApp name</b>, provided by WhatsApp so we can reply to you.</li>
 <li><b>The messages you send</b>: text, voice notes, images, and PDF, Word or HTML files.</li>
 <li><b>Your language preference and usage</b>, so we can reply in your language and apply fair daily limits.</li>
-<li><b>Your last few messages and replies</b>, so the assistant can follow the conversation (see section 5).</li>
+<li><b>Your last few messages and replies</b>, including the latest summary of a photo or document you sent, so the assistant can follow the conversation and repeat or expand a summary when you ask (see section 5).</li>
 <li><b>Technical information</b> such as message IDs and error details, which our hosting provider may keep in server logs.</li>
 </ul>
 <p>We only act on messages you send to us. We do not send promotions or unsolicited messages.</p>
@@ -1109,7 +1260,7 @@ p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}
 </ul>
 
 <h2>5. How long we keep information</h2>
-<p>We keep only a small amount of data to run the Service: your phone number, your preferred language, and your last few messages and replies, which are deleted automatically after 24 hours and used only so the assistant can follow the conversation. Daily usage counters are stored in anonymised form (no phone number) and expire after a day. Files, images and audio are handled in temporary memory or temporary files and are deleted once your reply is sent. Message IDs are held in memory only to avoid answering the same message twice and are lost when the service restarts. Technical logs kept by our hosting provider may contain your phone number and error details for a limited time set by that provider.</p>
+<p>We keep only a small amount of data to run the Service: your phone number, your preferred language, and your last few messages and replies, including the latest summary of a photo or document you sent (so you can ask for “more” or “repeat”), which are deleted automatically after 24 hours and used only so the assistant can follow the conversation. Daily usage counters are stored in anonymised form (no phone number) and expire after a day. Files, images and audio are handled in temporary memory or temporary files and are deleted once your reply is sent. Message IDs are held in memory only to avoid answering the same message twice and are lost when the service restarts. Technical logs kept by our hosting provider may contain your phone number and error details for a limited time set by that provider.</p>
 
 <h2>6. Your choices and deletion</h2>
 <p>You can stop using the service at any time by no longer messaging us, and you can block the number in WhatsApp. To delete your saved data immediately, send the message "delete my data" to the bot. To ask what we hold about you, or to have any data about you deleted, email us at @@EMAIL@@ with your WhatsApp number and we will respond within a reasonable time.</p>
@@ -1236,333 +1387,3 @@ async def receive(request: Request, background: BackgroundTasks):
             for msg in change.get("value", {}).get("messages", []) or []:
                 background.add_task(process_message, msg.get("from"), msg, msg.get("id"))
     return PlainTextResponse("ok")
-
-
-# =====================================================================
-#  ADD-ON: FULL SUMMARY + PREVIOUS MESSAGE RECALL
-#  Paste this whole block at the very END of your bot file (after the
-#  /webhook routes). It changes NO existing line: it only wraps existing
-#  functions (handle_text, process_message, send_reply, explain_*, read_*,
-#  delete_user_data) and adds two new tables. Remove the block to go back.
-#
-#  What users get
-#   1) "full summary" / "detailed summary" / "முழு சுருக்கம்"
-#        -> full organised summary of the LAST FILE they sent
-#           (or of the chat, if no file; "summary of chat" forces the chat)
-#   2) File + caption "full summary"
-#        -> full summary straight away (works for scanned PDFs and photos too)
-#   3) "previous messages" / "previous 5" / "history" / "recall"
-#        -> shows the last messages and replies
-#      "repeat" / "last reply" -> sends the last answer again
-#   Everything is kept 24 hours only (same as the existing chat memory)
-#   and is wiped by "delete my data".
-# =====================================================================
-
-ARCHIVE_TURNS = 40        # how many past turns to keep per user (within HISTORY_HOURS)
-RECALL_DEFAULT = 5        # "previous messages" shows this many
-RECALL_MAX = 15
-CHAT_SUMMARY_CHARS = 9000
-
-ADDON_MSG = {
-    "no_prev": "No earlier messages found (kept for 24 hours only) (Munnadi messages illa pa)",
-    "no_source": "Nothing to summarise yet. Send a PDF, Word, HTML file or photo with the caption \"full summary\", "
-                 "or send the file first and then type \"full summary\" 📄",
-    "no_text": "I could not read this file again. Please send it again with the caption \"full summary\" 🙏",
-}
-
-_ctx = threading.local()   # per-message scratch space (each message runs in its own thread)
-
-
-# ---------- storage ----------
-@_safe(None)
-def init_addon_db():
-    with _db_lock, _db() as con, con:
-        con.executescript("""
-            CREATE TABLE IF NOT EXISTS archive(id INTEGER PRIMARY KEY AUTOINCREMENT, wa_id TEXT, ts REAL, user_text TEXT, reply TEXT);
-            CREATE TABLE IF NOT EXISTS doc_store(wa_id TEXT PRIMARY KEY, ts REAL, filename TEXT, text TEXT);
-        """)
-        cutoff = time.time() - HISTORY_HOURS * 3600
-        con.execute("DELETE FROM archive WHERE ts < ?", (cutoff,))
-        con.execute("DELETE FROM doc_store WHERE ts < ?", (cutoff,))
-
-init_addon_db()
-
-@_safe(None)
-def archive_add(wa_id, user_text, reply):
-    now = time.time()
-    with _db_lock, _db() as con, con:
-        con.execute("INSERT INTO archive(wa_id, ts, user_text, reply) VALUES (?,?,?,?)",
-                    (wa_id, now, (user_text or "")[:1000], (reply or "")[:4000]))
-        con.execute("DELETE FROM archive WHERE wa_id=? AND (ts < ? OR id NOT IN "
-                    "(SELECT id FROM archive WHERE wa_id=? ORDER BY id DESC LIMIT ?))",
-                    (wa_id, now - HISTORY_HOURS * 3600, wa_id, ARCHIVE_TURNS))
-
-@_safe([])
-def archive_get(wa_id, n):
-    cutoff = time.time() - HISTORY_HOURS * 3600
-    with _db_lock, _db() as con:
-        rows = con.execute("SELECT ts, user_text, reply FROM archive WHERE wa_id=? AND ts>=? "
-                           "ORDER BY id DESC LIMIT ?", (wa_id, cutoff, n)).fetchall()
-    return list(reversed(rows))
-
-@_safe(None)
-def doc_save(wa_id, filename, text):
-    """Remember the text of the last file (or forget it when text is empty)."""
-    with _db_lock, _db() as con, con:
-        if (text or "").strip():
-            con.execute("INSERT OR REPLACE INTO doc_store(wa_id, ts, filename, text) VALUES (?,?,?,?)",
-                        (wa_id, time.time(), filename or "file", text[:MAX_PDF_TEXT_CHARS]))
-        else:
-            con.execute("DELETE FROM doc_store WHERE wa_id=?", (wa_id,))
-
-@_safe(None)
-def doc_load(wa_id):
-    cutoff = time.time() - HISTORY_HOURS * 3600
-    with _db_lock, _db() as con:
-        row = con.execute("SELECT filename, text FROM doc_store WHERE wa_id=? AND ts>=?", (wa_id, cutoff)).fetchone()
-    return (row[0], row[1]) if row and row[1] else None
-
-@_safe("")
-def saved_lang(wa_id):
-    with _db_lock, _db() as con:
-        row = con.execute("SELECT lang FROM users WHERE wa_id=?", (wa_id,)).fetchone()
-    return (row[0] or "") if row else ""
-
-
-# ---------- prompts ----------
-_FULL_RULES = (
-    "Plain text only: no markdown, no * or #. Never invent anything; copy names, dates, numbers and amounts exactly as in the source. "
-    "Write math formulas as plain text, one per line, always with both sides of '='. Keep every important detail, but do not pad."
-)
-FULL_SYSTEM = ("You are Kan Paarvai AI, a careful WhatsApp assistant that writes complete, accurate summaries. "
-               + _FULL_RULES + TAMIL_HINT + " Reply with JSON only.")
-
-FULL_DOC_PROMPT = (
-    'Reply with ONLY one JSON object: {"language": "", "gist": "", "reply": ""}\n'
-    '"reply" is a FULL, well organised summary of the document (or photo) using these labelled sections, '
-    'skipping any section that does not apply:\n'
-    '📌 What it is: kind of document and its purpose\n'
-    '🔑 Key points: 5-10 lines, each starting with "• "\n'
-    '👤 People / organisations: names and roles\n'
-    '📅 Dates & deadlines:\n'
-    '💰 Numbers & amounts:\n'
-    '✅ Actions / next steps:\n'
-    '⚠️ Important notes: conditions, warnings, exceptions\n'
-    '"gist" is a 2-3 sentence version of the summary that sounds natural when spoken aloud. '
-    'If the caption asks a specific question, also answer it under "❓ Answer:". ' + LANG_HINT + " "
-)
-
-FULL_CHAT_PROMPT = (
-    'Reply with ONLY one JSON object: {"language": "", "gist": "", "reply": ""}\n'
-    '"reply" is a FULL, well organised summary of this conversation between the User and the Assistant, '
-    'using these labelled sections, skipping any that do not apply:\n'
-    '📌 Topics discussed:\n'
-    '🔑 Key answers and facts: each line starting with "• "\n'
-    '💰 Numbers, dates and names mentioned:\n'
-    '✅ Decisions / things to do:\n'
-    '❓ Still open: questions not fully answered\n'
-    '"gist" is a 2-3 sentence version that sounds natural when spoken aloud. ' + LANG_HINT + " "
-)
-
-
-# ---------- intent detection (only short, exact commands, so normal questions are never hijacked) ----------
-_FULL_RE = re.compile(
-    r"^(?:please\s+)?(?:(?:full|detailed|complete|whole)\s+)?(?:summary|summarize|summarise|summarization)"
-    r"(?:\s+(?:of|about|for)?\s*(?:this|the|my|our|that)?\s*"
-    r"(?P<what>file|document|doc|pdf|word|html|page|chat|conversation|talk|messages?|it))?\s*[.!?]*$")
-_FULL_WORDS = {"முழு சுருக்கம்", "சுருக்கம்", "முழு சுருக்கம் சொல்லு", "summary pannunga", "summary podunga",
-               "full summary pannunga", "full summary podunga"}
-_CHAT_WORDS = {"chat", "conversation", "talk", "message", "messages"}
-
-_RECALL_RE = re.compile(
-    r"^(?:please\s+)?(?:(?:show|get|give|see|send)\s+(?:me\s+)?)?(?:my\s+|the\s+)?"
-    r"(?:(?:previous|earlier|old|last|past|recent)\s+(?P<n1>\d+)?\s*(?:messages?|chats?|conversations?|questions?)"
-    r"|(?:previous|earlier|last|past|recent)\s+(?P<n3>\d+)"
-    r"|(?:chat\s+)?history|recall)(?:\s+(?P<n2>\d+))?\s*[.!?]*$")
-_RECALL_WORDS = {"முந்தைய செய்திகள்", "பழைய செய்திகள்", "mundhaiya messages", "pazhaya messages"}
-
-_REPEAT_RE = re.compile(r"^(?:please\s+)?(?:(?:repeat|resend|send again)(?:\s+(?:the\s+)?(?:last|previous)\s+(?:reply|answer|message))?"
-                        r"|(?:last|previous)\s+(?:reply|answer))\s*[.!?]*$")
-
-_FULL_CAPTION = re.compile(r"\b(?:full|detailed|complete)\s+summary\b|முழு\s+சுருக்கம்", re.I)
-
-def wants_full(caption):
-    return bool(caption and _FULL_CAPTION.search(caption))
-
-def classify_request(text):
-    """-> (intent, arg): ('recall', n) | ('repeat', None) | ('full', 'chat'|'doc'|None) | (None, None)"""
-    t = " ".join((text or "").lower().split()).lstrip("/")
-    if not t or len(t) > 60: return None, None
-    if t in _RECALL_WORDS: return "recall", None
-    m = _RECALL_RE.match(t)
-    if m: return "recall", int(m.group("n1") or m.group("n3") or m.group("n2") or 0) or None
-    if _REPEAT_RE.match(t): return "repeat", None
-    if t in _FULL_WORDS: return "full", None
-    m = _FULL_RE.match(t)
-    if m:
-        what = m.group("what")
-        return "full", ("chat" if what in _CHAT_WORDS else "doc" if what else None)
-    return None, None
-
-
-# ---------- full summary ----------
-def run_full_summary(sender, kind, source, header, lang, extra=None, caption=""):
-    """kind: 'doc' or 'chat'. extra = image parts (scanned PDF pages / photo)."""
-    contents = list(extra or [])
-    if source: contents.append(("Document text:\n" if kind == "doc" else "Conversation:\n") + source)
-    if caption: contents.append(f"Caption: {caption}")
-    prompt = (FULL_DOC_PROMPT if kind == "doc" else FULL_CHAT_PROMPT) + f' Write in language code "{base_lang(lang) or DEFAULT_LANG}" unless the caption is in another language.'
-    data, rlang = ask_with_lang(contents, FULL_SYSTEM + " " + prompt)
-    reply = correct_tamil_maths_spelling((data.get("reply") or "").strip())
-    if not reply: raise RuntimeError("empty summary")
-    send_text(sender, f"{header}\n\n{reply}")
-    gist = clean_for_speech(_EMOJI.sub("", clean_text(data.get("gist") or ""))).strip()
-    if gist:                                   # short spoken version; the full text is already sent
-        try: send_voice(sender, gist, rlang)
-        except Exception as e: log.warning(f"voice failed: {e}")
-    if getattr(_ctx, "replies", None) is not None: _ctx.replies.append(reply)
-
-def _chat_source(sender):
-    rows = archive_get(sender, ARCHIVE_TURNS)
-    text = "\n".join(f"User: {u}\nAssistant: {r}" for _, u, r in rows)
-    return text[-CHAT_SUMMARY_CHARS:]
-
-def full_summary_command(sender, what):
-    """Text command: 'full summary' (file first, else chat), 'summary of chat' (chat only)."""
-    doc = doc_load(sender) if what != "chat" else None
-    chat = "" if doc else _chat_source(sender)
-    if not doc and not chat:
-        safe_send_text(sender, ADDON_MSG["no_source"]); return
-    if over_limit(sender, "chat"): return
-    lang = saved_lang(sender) or DEFAULT_LANG
-    if doc:
-        run_full_summary(sender, "doc", doc[1], f"🧾 Full summary: {doc[0]}", lang)
-    else:
-        run_full_summary(sender, "chat", chat, "🧾 Full summary of our chat", lang)
-
-def _caption_lang(sender, caption):
-    return guess_lang(caption) if re.search(r"[^\W\d_]", caption or "") and not is_latin_text(caption) \
-        else (saved_lang(sender) or DEFAULT_LANG)
-
-def full_from_file(sender, kind, data, filename, caption):
-    """File + caption 'full summary': read it again and summarise in full (also stores it for later)."""
-    lang = _caption_lang(sender, caption)
-    extra, source = [], ""
-    if kind == "pdf":
-        pages, source, extra = read_pdf(data)
-        header = f"📄 Full summary: {filename} ({pages} page{'s' if pages != 1 else ''})"
-        if extra: extra = [*extra, f"These are {len(extra)} sample pages, spread across a {pages}-page PDF."]
-    elif kind == "docx":
-        source = read_docx(data); header = f"📝 Full summary: {filename}"
-    else:
-        source = read_html(data); header = f"🌐 Full summary: {filename}"
-    doc_save(sender, filename, source)
-    run_full_summary(sender, "doc", source, header, lang, extra, caption)
-
-
-# ---------- recall ----------
-def recall_command(sender, n):
-    n = max(1, min(n or RECALL_DEFAULT, RECALL_MAX))
-    rows = archive_get(sender, n)
-    if not rows:
-        safe_send_text(sender, ADDON_MSG["no_prev"]); return
-    tz = ZoneInfo(LOCAL_TZ)
-    parts = [f"🕘 Your last {len(rows)} message{'s' if len(rows) != 1 else ''} (kept 24 hours):"]
-    for ts, u, r in rows:
-        when = datetime.fromtimestamp(ts, tz).strftime("%d %b, %I:%M %p")
-        u = (u or "").strip(); r = (r or "").strip()
-        parts.append(f"[{when}]\n🧑 {u[:300]}{'…' if len(u) > 300 else ''}\n🤖 {r[:600]}{'…' if len(r) > 600 else ''}")
-    send_text(sender, "\n\n".join(parts))
-
-def repeat_command(sender):
-    rows = archive_get(sender, 1)
-    if not rows or not rows[-1][2]:
-        safe_send_text(sender, ADDON_MSG["no_prev"]); return
-    reply = rows[-1][2]
-    send_reply(sender, reply, guess_lang(reply))
-
-
-# ---------- hooks (wrap existing functions; originals are called unchanged) ----------
-_orig_read_pdf, _orig_read_docx, _orig_read_html = read_pdf, read_docx, read_html
-
-def read_pdf(data):
-    r = _orig_read_pdf(data); _ctx.doc_text = r[1]; return r
-def read_docx(data):
-    t = _orig_read_docx(data); _ctx.doc_text = t; return t
-def read_html(data):
-    t = _orig_read_html(data); _ctx.doc_text = t; return t
-
-def _wrap_file_explainer(orig, kind):
-    def wrapper(sender, data, filename, caption):
-        doc_save(sender, "", "")                 # newest file wins
-        if wants_full(caption):
-            return full_from_file(sender, kind, data, filename, caption)
-        _ctx.doc_text = ""
-        orig(sender, data, filename, caption)    # normal short explanation, unchanged
-        doc_save(sender, filename, getattr(_ctx, "doc_text", ""))
-    wrapper.__name__ = orig.__name__
-    return wrapper
-
-explain_pdf = _wrap_file_explainer(explain_pdf, "pdf")
-explain_docx = _wrap_file_explainer(explain_docx, "docx")
-explain_html = _wrap_file_explainer(explain_html, "html")
-
-_orig_explain_image = explain_image
-def explain_image(sender, data, caption):
-    doc_save(sender, "", "")
-    if wants_full(caption):
-        part = types.Part.from_bytes(data=prepare_image(data), mime_type="image/jpeg")
-        run_full_summary(sender, "doc", "", "🖼️ Full summary of your image", _caption_lang(sender, caption), [part], caption)
-        return
-    return _orig_explain_image(sender, data, caption)
-
-_orig_send_reply = send_reply
-def send_reply(to, text, lang):
-    r = getattr(_ctx, "replies", None)
-    if r is not None: r.append(text or "")
-    return _orig_send_reply(to, text, lang)
-
-_orig_handle_text = handle_text
-def handle_text(sender, message):
-    intent, arg = classify_request(message.get("text", {}).get("body", ""))
-    if intent:
-        _ctx.skip_log = True                     # commands are not stored as chat turns
-        if intent == "recall": recall_command(sender, arg)
-        elif intent == "repeat": repeat_command(sender)
-        else: full_summary_command(sender, arg)
-        return
-    return _orig_handle_text(sender, message)
-
-_orig_delete_user_data = delete_user_data
-def delete_user_data(wa_id):
-    _orig_delete_user_data(wa_id)
-    _wipe_addon_data(wa_id)
-
-@_safe(None)
-def _wipe_addon_data(wa_id):
-    with _db_lock, _db() as con, con:
-        con.execute("DELETE FROM archive WHERE wa_id=?", (wa_id,))
-        con.execute("DELETE FROM doc_store WHERE wa_id=?", (wa_id,))
-
-def _message_label(message):
-    kind = message.get("type", "")
-    if kind == "text": return message.get("text", {}).get("body", "")
-    if kind == "audio": return "🎤 voice message"
-    if kind == "image": return "📷 photo " + (message["image"].get("caption") or "")
-    if kind == "document":
-        d = message["document"]; return f"📎 {d.get('filename') or 'file'} {d.get('caption') or ''}".strip()
-    return "(menu choice)" if kind == "interactive" else f"({kind})"
-
-_orig_process_message = process_message
-def process_message(sender, message, message_id):
-    _ctx.replies, _ctx.skip_log, _ctx.doc_text = [], False, ""
-    try:
-        return _orig_process_message(sender, message, message_id)
-    finally:
-        try:
-            if _ctx.replies and not _ctx.skip_log:
-                archive_add(sender, _message_label(message).strip(), "\n".join(_ctx.replies))
-        except Exception as e:
-            log.warning(f"archive failed: {e}")
-        _ctx.replies = []
-# ===================== END OF ADD-ON =====================
