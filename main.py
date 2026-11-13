@@ -32,7 +32,7 @@ from google.genai import types
 from docx import Document
 
 try:
-    import edge_tts          # Natural neural voices; gTTS is used as fallback
+    import edge_tts          # natural neural voices; gTTS is used if this is missing or fails
 except ImportError:
     edge_tts = None
 
@@ -55,13 +55,13 @@ MAX_PDF_TEXT_CHARS = 15000
 MAX_VOICE_CHARS = 1200
 MAX_VOICE_SEGMENTS = 25
 TTS_ENGINE = os.getenv("TTS_ENGINE", "edge").lower()          # "edge" (neural) or "gtts"
-EDGE_VOICE_OVERRIDES = json.loads(os.getenv("EDGE_VOICES", "{}") or "{}")
-DB_PATH = os.getenv("DB_PATH", "kan_paarvai.db")
+EDGE_VOICE_OVERRIDES = json.loads(os.getenv("EDGE_VOICES", "{}") or "{}")   # e.g. {"ta": "ta-IN-ValluvarNeural"}
+DB_PATH = os.getenv("DB_PATH", "kan_paarvai.db")        # point at a Render Disk (e.g. /var/data/bot.db) to keep data across deploys
 LIMITS = {"chat": int(os.getenv("LIMIT_CHAT", "60")), "image": int(os.getenv("LIMIT_IMAGE", "5")),
-          "file": int(os.getenv("LIMIT_FILE", "15"))}
-ADMINS = {x.strip() for x in os.getenv("ADMIN_NUMBERS", "").split(",") if x.strip()}
-HISTORY_TURNS = 6
-HISTORY_HOURS = 24
+          "file": int(os.getenv("LIMIT_FILE", "15"))}   # per user per day
+ADMINS = {x.strip() for x in os.getenv("ADMIN_NUMBERS", "").split(",") if x.strip()}   # exempt from limits, get error alerts
+HISTORY_TURNS = 6        # last 6 question/answer pairs
+HISTORY_HOURS = 24       # ...kept for 24 hours only
 FONT_DIR = str(Path(__file__).resolve().parent / "fonts")
 Path(FONT_DIR).mkdir(parents=True, exist_ok=True)
 
@@ -71,19 +71,11 @@ app = FastAPI(title="Kan Paarvai AI")
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 GRAPH = f"https://graph.facebook.com/{GRAPH_VERSION}"
 
-STYLE_RULES = (
-    "Keep answers crisp and structured (maximum 5 sentences, ~600 characters). "
-    "First sentence must introduce what the item is. Next 2-4 sentences provide priority details. "
-    "Never drop amounts, dates, times, phone numbers, names, addresses, warnings, or medicine dosages. "
-    "Write math formulas as plain text, e.g. πr^2, a^2 + b^2 = c^2, x × y, a ÷ b; do not use * or markdown. "
-    "Always write every formula completely, with both sides of '=', one formula per line; never drop the left side."
-)
-TAMIL_HINT = (
-    " If you write Tamil, use correct standard spelling and proper school maths terms "
-    "(e.g. வடிவொத்த முக்கோணங்கள், தொடுகோடு, நேர்மாறுபாடு, எதிர்மாறுபாடு). Never put symbols like • inside words."
-)
+STYLE_RULES = "Keep answers short, simple and clear. Write math formulas as plain text, e.g. πr^2, a^2 + b^2 = c^2, x × y, a ÷ b; do not use * or markdown. Always write every formula completely, with both sides of '=', one formula per line; never drop the left side."
+TAMIL_HINT = (" If you write Tamil, use correct standard spelling and proper school maths terms "
+              "(e.g. வடிவொத்த முக்கோணங்கள், தொடுகோடு, நேர்மாறுபாடு, எதிர்மாறுபாடு). Never put symbols like • inside words.")
 LANG_HINT = ' "language" is the ISO 639-1 code of your reply (e.g. ta, en, hi).'
-SYSTEM_PROMPT = f"You are Kan Paarvai AI, a WhatsApp accessibility assistant. Always reply in the SAME language the user used. If there is no user text, reply in language code '{DEFAULT_LANG}'. " + STYLE_RULES + TAMIL_HINT
+SYSTEM_PROMPT = f"You are Kan Paarvai AI, a helpful WhatsApp assistant. Always reply in the SAME language the user used. If there is no user text, reply in language code '{DEFAULT_LANG}'. " + STYLE_RULES + TAMIL_HINT
 
 TEXT_PROMPT = """You ARE ABLE to generate images. NEVER say "I cannot generate images". If user asks for an image, you MUST return kind="image".
 Read the user's message and reply with ONLY one JSON object, no markdown fences:
@@ -103,19 +95,21 @@ Rules:
 
 MEDIA_PROMPT = """Reply with ONLY one JSON object: {"language": "", "reply": ""} Answer in caption language, otherwise '""" + DEFAULT_LANG + """'. """ + STYLE_RULES + LANG_HINT + TAMIL_HINT + " "
 
+VOICE_PROMPT = 'Reply with ONLY one JSON object: {"language": "", "reply": ""} Listen to the audio and answer it in the same language the speaker used. ' + STYLE_RULES + LANG_HINT
+
 IMAGE_PROMPT = MEDIA_PROMPT + (
     "Task: look at the image and explain in 3-5 short lines what is in it: the main subject, "
-    "important details, and any visible text (read it briefly). Never drop numbers, dates, or amounts. If the caption asks a question, answer it instead."
+    "important details, and any visible text (read it briefly). If the caption asks a question, answer it instead."
 )
 
 DOC_PROMPT = MEDIA_PROMPT + (
-    "Task: explain in 4-6 short lines (max 5 sentences) what this document contains: what kind of document it is, "
-    "the main topics, and key points. NEVER drop amounts, dates, times, phone numbers, names, addresses, or deadlines. If the caption asks a question, answer it too."
+    "Task: explain in 4-6 short lines what this document contains: what kind of document it is, "
+    "the main topics, and the key points or numbers. If the caption asks a question, answer it too."
 )
 
 HTML_PROMPT = MEDIA_PROMPT + (
     "Task: this is a web page (HTML file). Explain in 4-6 short lines what it contains: what the page is about "
-    "or does, its main sections, and key points without missing dates or contact info. Do not show code. If the caption asks a question, answer it too."
+    "or does, its main sections, and the key points. Do not show code. If the caption asks a question, answer it too."
 )
 
 MSG = {
@@ -199,29 +193,31 @@ RTL_LANGS = {"ar","fa","ur","he","iw"}
 def base_lang(code): return (code or "").strip().lower().replace("_","-").split("-")[0]
 
 
-# ---------- TAMIL MATHS SPELLING & POST-PROCESSING ----------
+# ---------- TAMIL MATHS SPELLING ----------
 TAMIL_RANGE = "\u0B80-\u0BFF"
-TAMIL_FIXES = [
-    ("வடிசவொ", "வடிவொ"),                  # வடிவொத்த (similar triangles)
+TAMIL_FIXES = [  # (wrong, right) - add more here whenever you spot a repeated mistake
+    ("வடிசவொ", "வடிவொ"),                  # வடிவொத்த (similar) triangles
     ("நேர்மொறுபாடு", "நேர்மாறுபாடு"),      # direct variation
     ("எதிர்மொறுபாடு", "எதிர்மாறுபாடு"),    # inverse variation
     ("மொறுபாடு", "மாறுபாடு"),
 ]
 
 def correct_tamil_maths_spelling(text):
-    """Fix common broken Tamil spellings/symbols from garbled PDF text layers."""
+    """Fix common broken Tamil spellings/symbols that come from garbled PDF text."""
     if not text or not re.search(f"[{TAMIL_RANGE}]", text): return text
-    text = unicodedata.normalize("NFC", text)
-    text = re.sub("[\u0BCA\u0BCB]\u0BBE", lambda m: m.group(0)[0], text)
-    text = re.sub(f"(?<=[{TAMIL_RANGE}])[ \\t]*[•·][ \\t]*(?=[{TAMIL_RANGE}])", "", text)
+    text = unicodedata.normalize("NFC", text)                      # ெ+ா -> ொ
+    text = re.sub("[\u0BCA\u0BCB]\u0BBE", lambda m: m.group(0)[0], text)   # ொா -> ொ, ோா -> ோ
+    text = re.sub(f"(?<=[{TAMIL_RANGE}])[ \\t]*[•·][ \\t]*(?=[{TAMIL_RANGE}])", "", text)  # ஆவண • மாகும்
     for wrong, right in TAMIL_FIXES:
         text = text.replace(wrong, right)
     return re.sub(r"[ \t]{2,}", " ", text).strip()
 
 def clean_for_speech(text):
+    """Spelling first, then drop leftover bullets (they are never spoken)."""
     return re.sub(r"[•·●▪]", " ", correct_tamil_maths_spelling(text))
 
 def looks_garbled(text):
+    """True when extracted PDF text is probably broken (old Tamil fonts): stray bullets, orphan vowel signs."""
     flat = re.sub(r"\s+", "", text or "")
     if not flat: return True
     tamil = sum(1 for c in flat if "\u0B80" <= c <= "\u0BFF")
@@ -233,13 +229,14 @@ def looks_garbled(text):
     return odd / len(flat) > 0.05
 
 
-# ---------- STORAGE (SQLite) ----------
+# ---------- STORAGE (SQLite: language, daily limits, short chat memory) ----------
 _db_lock = threading.Lock()
 
 def _db():
     return closing(sqlite3.connect(DB_PATH, timeout=10))
 
 def _safe(default):
+    """Storage problems must never stop the bot from answering."""
     def deco(fn):
         def wrap(*a, **k):
             try: return fn(*a, **k)
@@ -250,7 +247,7 @@ def _safe(default):
     return deco
 
 def _today(): return datetime.now(ZoneInfo(LOCAL_TZ)).strftime("%Y-%m-%d")
-def _anon(wa_id): return hashlib.sha256(f"{META_APP_SECRET}|{wa_id}".encode()).hexdigest()[:16]
+def _anon(wa_id): return hashlib.sha256(f"{META_APP_SECRET}|{wa_id}".encode()).hexdigest()[:16]   # counters hold no phone numbers
 
 @_safe(None)
 def init_db():
@@ -265,6 +262,7 @@ def init_db():
 
 @_safe(False)
 def touch_user(wa_id):
+    """Returns True the first time we see this number."""
     now = datetime.now(ZoneInfo(LOCAL_TZ)).isoformat(timespec="seconds")
     with _db_lock, _db() as con, con:
         new = con.execute("INSERT OR IGNORE INTO users(wa_id, first_seen, last_seen) VALUES (?,?,?)",
@@ -280,6 +278,7 @@ def set_lang(wa_id, lang):
 
 @_safe(True)
 def use_quota(wa_id, kind):
+    """True and counts one use while the user is under today's limit; False when the limit is reached."""
     who, day = _anon(wa_id), _today()
     with _db_lock, _db() as con, con:
         row = con.execute("SELECT n FROM usage WHERE who=? AND day=? AND kind=?", (who, day, kind)).fetchone()
@@ -417,7 +416,7 @@ def send_document(to, path, filename, caption=""):
     })
 
 
-# ---------- VOICE & SPEECH NORMALIZATION ----------
+# ---------- VOICE ----------
 TTS_LANGS = tts_langs()
 _EMOJI = re.compile("[\U00010000-\U0010ffff\u2600-\u27bf\ufe0f]")
 
@@ -440,6 +439,7 @@ MATH_WORDS = {
                sq="का वर्ग", cube="का घन", pow="की घात", root="वर्गमूल",
                pi="पाई", pct="प्रतिशत", range="{0} से {1} तक"),
 }
+# Tamil letter names, so variables (a, b, x...) are read by the Tamil voice
 TA_LETTERS = dict(zip("abcdefghijklmnopqrstuvwxyz", [
     "ஏ", "பி", "சி", "டி", "இ", "எஃப்", "ஜி", "எச்", "ஐ", "ஜே", "கே", "எல்", "எம்",
     "என்", "ஓ", "பீ", "கியூ", "ஆர்", "எஸ்", "டீ", "யூ", "வி", "டபிள்யூ", "எக்ஸ்", "வை", "இசட்"]))
@@ -450,18 +450,20 @@ EN_LETTERS = dict(zip("abcdefghijklmnopqrstuvwxyz", [
 
 _VAR = r"(?<![A-Za-z])[A-Za-z](?![A-Za-z])"
 _LEFT = rf"(?:{_VAR}|\d[A-Za-z]{{1,3}}(?![A-Za-z])|\d|\)|π|ரூபாய்|रुपये|rupees)(?:\^\(?-?\w+\)?|[²³])?"
+# right operand: number, "(", √, π, or a lone letter that is not an article ("a great deal")
 _RIGHT = rf"(?=[\d(√π]|(?<![A-Za-z])[A-Za-z](?![A-Za-z])(?!\s+[A-Za-z]{{2,}}))"
 
 def _binop(text, op, word):
     return re.sub(rf"({_LEFT})\s*(?:{op})\s*{_RIGHT}", lambda m: f"{m.group(1)} {word} ", text)
 
 def math_speech(text, native):
+    """Speak formulas: a^2 - b^2 = c -> 'a squared minus b squared equals c' (in the reply's language)."""
     w = MATH_WORDS.get(native, MATH_WORDS["en"])
     text = text.replace("<=", "≤").replace(">=", "≥").replace("!=", "≠")
     text = re.sub(r"(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})",
-                  lambda m: w["range"].format(m.group(1), m.group(2)), text)
+                  lambda m: w["range"].format(m.group(1), m.group(2)), text)   # 10:30 - 11:30
     mathy = bool(re.search(r"[=+×÷^√π≤≥≠²³<>]|\d\s*[*/]\s*\d|(?<![A-Za-z])[A-Za-z]\s*[-−–]\s*[\dA-Za-z(]", text))
-    if not mathy:
+    if not mathy:  # plain "10-20" is a range, not a subtraction
         text = re.sub(r"(?<![\d:.])(\d+)\s*[-–]\s*(\d+)(?![\d:.])",
                       lambda m: w["range"].format(m.group(1), m.group(2)), text)
     for op, key in ((r"[-−–]", "minus"), (r"\+", "plus"), (r"[*×]", "times"),
@@ -473,8 +475,8 @@ def math_speech(text, native):
     text = re.sub(r"\^\s*2(?!\d)|²", f" {w['sq']} ", text)
     text = re.sub(r"\^\s*3(?!\d)|³", f" {w['cube']} ", text)
     text = re.sub(r"\^\s*\(?\s*(-?[\w.]+)\s*\)?", lambda m: f" {w['pow']} {m.group(1)} ", text)
-    text = re.sub(rf"(?<![\w)])[-−](?=\d|\(|{_VAR})", f" {w['minus']} ", text)
-    if mathy:
+    text = re.sub(rf"(?<![\w)])[-−](?=\d|\(|{_VAR})", f" {w['minus']} ", text)   # negative numbers: -5
+    if mathy:  # say variables by letter name (a -> "ay", b -> "bee"), only next to maths words/digits/brackets
         names = TA_LETTERS if native == "ta" else EN_LETTERS
         cues = tuple(w[k] for k in ("plus", "minus", "times", "div", "eq", "ne", "lt", "gt", "le", "ge",
                                     "sq", "cube", "pow", "root", "pi"))
@@ -486,13 +488,13 @@ def math_speech(text, native):
                       lambda m: f" {names[m.group(0).lower()]} "
                       if near(src[:m.start()].rstrip(), src[m.end():].lstrip()) else m.group(0), src)
         src = text
-        def product(m):
+        def product(m):   # 2ab -> 2 ay bee
             after = src[m.end():].lstrip()
             if m.group(1).lower() in ("st", "nd", "rd", "th"): return m.group(0)
             if after and not (after[0] in "().,;:!?" or after.startswith(cues)): return m.group(0)
             return " " + " ".join(names[c.lower()] for c in m.group(1)) + " "
         text = re.sub(r"(?<=\d)([A-Za-z]{1,3})(?![A-Za-z])", product, text)
-    text = re.sub(r"(வரை|तक)(\s+\1)+", r"\1", text)
+    text = re.sub(r"(வரை|तक)(\s+\1)+", r"\1", text)   # text already said "வரை"/"तक"
     return re.sub(r"[ \t]{2,}", " ", text)
 
 AND_WORDS = {"ta": "மற்றும்", "hi": "और"}
@@ -501,7 +503,7 @@ CURRENCY_WORDS = {
     "€": {"en": "euros", "ta": "யூரோ", "hi": "यूरो"},
     "£": {"en": "pounds", "ta": "பவுண்டு", "hi": "पाउंड"},
 }
-UNIT_WORDS = {
+UNIT_WORDS = {   # unit -> {language: spoken form}
     "km/h": {"en": "kilometres per hour", "ta": "கிலோமீட்டர் பெர் ஹவர்", "hi": "किलोमीटर प्रति घंटा"},
     "km": {"en": "kilometres", "ta": "கிலோமீட்டர்", "hi": "किलोमीटर"},
     "kg": {"en": "kilograms", "ta": "கிலோகிராம்", "hi": "किलोग्राम"},
@@ -514,6 +516,7 @@ UNIT_WORDS = {
 }
 
 def speech_normalize(text, native):
+    """Say symbols, units and abbreviations the way a person would, in the reply's language."""
     lang = native if native in ("ta", "hi") else "en"
     num = r"\d+(?:\.\d+)?"
     for sym, words in CURRENCY_WORDS.items():
@@ -530,8 +533,10 @@ def speech_normalize(text, native):
     return text.replace("&", f" {AND_WORDS.get(native, 'and')} ")
 
 def speech_text(text, lang):
+    """Make text safe for TTS: remove URLs, 1,000 -> 1000, 19.11.2026 -> 19 11 2026,
+    Rs / ₹ / INR / ரூ -> rupees word, and maths symbols (+ - × ÷ = ^ √ π ...) -> spoken words."""
     text = re.sub(r"https?://\S+|www\.\S+", " ", text)
-    text = re.sub(r"([^\s.!?।,;:])[ \t]*\n+[ \t]*", r"\1. ", text)
+    text = re.sub(r"([^\s.!?।,;:])[ \t]*\n+[ \t]*", r"\1. ", text)   # a new line = a pause
     text = re.sub(r"\s*\n+\s*", " ", text)
     native = None if is_latin_text(text) else guess_lang(text)
     word = RUPEE_WORDS.get(native, "rupees")
@@ -544,6 +549,7 @@ def speech_text(text, lang):
     return math_speech(speech_normalize(text, native), native)
 
 def _split_runs(text):
+    """Split into runs of Latin / non-Latin letters so each run gets the right voice."""
     runs = []
     for ch in text:
         flag = (_script_of(ch) == "LATIN") if ch.isalpha() else None
@@ -570,6 +576,7 @@ def _voice_chunks(text, size=200):
     return chunks
 
 def _voice_pieces(text, lang):
+    """[(chunk, tts_lang)]: English words inside Tamil text are spoken by an English voice."""
     code = base_lang(lang)
     if code == "iw": code = "he"
     base = code if code in TTS_LANGS else "en"
@@ -586,7 +593,7 @@ def _voice_pieces(text, lang):
             if re.search(r"\w", chunk): pieces.append((chunk, vlang))
     return pieces[:MAX_VOICE_SEGMENTS]
 
-EDGE_VOICES = {
+EDGE_VOICES = {   # language code -> Microsoft neural voice (override with the EDGE_VOICES env setting)
     "ta": "ta-IN-PallaviNeural", "en": "en-IN-NeerjaNeural", "hi": "hi-IN-SwaraNeural",
     "te": "te-IN-ShrutiNeural", "ml": "ml-IN-SobhanaNeural", "kn": "kn-IN-SapnaNeural",
     "bn": "bn-IN-TanishaaNeural", "mr": "mr-IN-AarohiNeural", "gu": "gu-IN-DhwaniNeural",
@@ -609,6 +616,7 @@ async def _edge_bytes(text, voice, rate="+0%"):
     return bytes(out)
 
 def _synth_edge(pieces, rate="+0%"):
+    """All pieces with neural voices (4 at a time, order kept). Raises if any piece can't be made."""
     voices = [edge_voice(l) for _, l in pieces]
     if not all(voices): raise RuntimeError("no neural voice for a piece")
     async def run():
@@ -616,7 +624,7 @@ def _synth_edge(pieces, rate="+0%"):
         async def one(chunk, voice):
             async with sem: return await _edge_bytes(chunk, voice, rate)
         return await asyncio.gather(*(one(c, v) for (c, _), v in zip(pieces, voices)))
-    with ThreadPoolExecutor(max_workers=1) as ex:
+    with ThreadPoolExecutor(max_workers=1) as ex:   # own thread = own event loop, safe anywhere
         return b"".join(ex.submit(asyncio.run, run()).result(timeout=120))
 
 def _synth_gtts(pieces):
@@ -626,13 +634,24 @@ def _synth_gtts(pieces):
         gTTS(text=chunk, lang=vlang, **kw).write_to_fp(audio)
     return audio.getvalue()
 
+def enhance_maths_voice(text, lang="ta"):
+    """Spelling + maths/pronunciation clean-up for speech."""
+    return speech_text(clean_for_speech(text), lang)
+
+async def tamil_super_voice(text, path="super_tamil.mp3", lang="ta"):
+    """Standalone helper: speak text with the Tamil neural voice and save an mp3."""
+    pieces = _voice_pieces(enhance_maths_voice(text, lang), lang)
+    audio = b"".join([await _edge_bytes(c, edge_voice(l), "-10%") for c, l in pieces])
+    Path(path).write_bytes(audio)
+    return path
+
 def send_voice(to, text, lang):
     text = clean_for_speech(_EMOJI.sub("", clean_text(text)))[:MAX_VOICE_CHARS].strip()
     pieces = _voice_pieces(speech_text(text, lang), lang)
     if not pieces: return
     audio = None
     if edge_tts and TTS_ENGINE == "edge":
-        slow = "-10%" if re.search(r"[=+×÷^√π≤≥≠²³]", text) else "+0%"
+        slow = "-10%" if re.search(r"[=+×÷^√π≤≥≠²³]", text) else "+0%"   # formulas a little slower = clearer
         try: audio = _synth_edge(pieces, slow)
         except Exception as e: log.warning(f"neural voice failed, using gTTS: {e}")
     if audio is None: audio = _synth_gtts(pieces)
@@ -646,6 +665,7 @@ def send_voice(to, text, lang):
         if os.path.exists(path): os.remove(path)
 
 def send_reply(to, text, lang):
+    """Text first, then a voice copy. Voice failure never blocks the text."""
     text = correct_tamil_maths_spelling((text or "").strip()) or MSG["retry"]
     send_text(to, text)
     try: send_voice(to, text, lang)
@@ -655,7 +675,7 @@ def send_reply(to, text, lang):
 # ---------- IMAGE GENERATION ----------
 _img_lock = threading.Lock()
 _last_img = 0.0
-IMG_GAP = 46
+IMG_GAP = 46  # free limit: 1 image per 45 s per IP
 
 def generate_image_bytes(prompt, lang_code="ta"):
     global _last_img
@@ -663,7 +683,7 @@ def generate_image_bytes(prompt, lang_code="ta"):
     if "diwali" in prompt.lower():
         full_prompt += ", beautiful Diwali festival, oil lamps, rangoli, colorful, 4k, festive, no text"
     url = f"https://image.pollinations.ai/prompt/{requests.utils.quote(full_prompt)}?width=1024&height=1024&nologo=true&model=flux"
-    with _img_lock:
+    with _img_lock:  # one request at a time, spaced out to respect the free limit
         for attempt in range(3):
             gap = IMG_GAP - (time.time() - _last_img)
             if gap > 0: time.sleep(gap)
@@ -673,6 +693,8 @@ def generate_image_bytes(prompt, lang_code="ta"):
                 if r.ok and r.headers.get("Content-Type", "").startswith("image"):
                     return r.content
                 log.error(f"Image gen HTTP {r.status_code}: {r.text[:200]}")
+                m = re.search(r"Retry after (\d+)s", r.text)
+                if m: time.sleep(min(int(m.group(1)) + 2, 60))
             except Exception as e:
                 log.error(f"Image gen failed: {e}")
     return None
@@ -685,7 +707,7 @@ def wants_image(lower):
         or ("generate" in lower and "diwali" in lower)
 
 
-# ---------- READ IMAGE, PDF, WORD, HTML ----------
+# ---------- READ IMAGE ----------
 def prepare_image(data):
     try:
         img = ImageOps.exif_transpose(Image.open(BytesIO(data)))
@@ -702,11 +724,14 @@ def explain_image(sender, data, caption):
     result, lang = ask_with_lang([part, f"Caption: {caption}" if caption else "No caption."], IMAGE_PROMPT)
     send_reply(sender, result.get("reply") or MSG["retry"], lang)
 
+
+# ---------- READ PDF / WORD ----------
 def _sample_pages(pages, n):
     if pages <= n: return list(range(pages))
     return sorted({round(i * (pages - 1) / (n - 1)) for i in range(n)})
 
 def read_pdf(data):
+    """Returns (page_count, text, image_parts). Scanned or garbled PDFs are read from page images."""
     doc = fitz.open(stream=data, filetype="pdf")
     try:
         if doc.needs_pass: raise EmptyFile()
@@ -715,7 +740,7 @@ def read_pdf(data):
         if len(re.sub(r"\s+", "", text)) >= 50 and not looks_garbled(text):
             return pages, text[:MAX_PDF_TEXT_CHARS], []
         parts = []
-        for i in _sample_pages(pages, MAX_PDF_IMAGE_PAGES):
+        for i in _sample_pages(pages, MAX_PDF_IMAGE_PAGES):   # spread across the file, not just the first pages
             pix = doc[i].get_pixmap(matrix=fitz.Matrix(2, 2))
             parts.append(types.Part.from_bytes(data=pix.tobytes("jpeg"), mime_type="image/jpeg"))
         if not parts: raise EmptyFile()
@@ -748,7 +773,10 @@ def explain_docx(sender, data, filename, caption):
     result, lang = ask_with_lang([f"Document text:\n{text}", f"Caption: {caption}" if caption else "No caption."], DOC_PROMPT)
     send_reply(sender, f"📝 {filename}\n\n{result.get('reply') or MSG['retry']}", lang)
 
+
+# ---------- READ HTML ----------
 class _HTMLReader(HTMLParser):
+    """Collects visible text (no scripts/styles) plus a few structure facts."""
     SKIP = {"script", "style", "noscript", "template", "svg"}
     HEADS = {"h1", "h2", "h3"}
     BLOCK = {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article",
@@ -804,7 +832,7 @@ def read_html(data):
     return (f"Title: {title or '-'}\n"
             f"Headings: {' | '.join(p.headings[:15]) or '-'}\n"
             f"Links: {p.links}, Images: {p.images}, Forms: {p.forms}, Scripts: {p.scripts}\n\n"
-            f"Visible text:\n{body[:MAX_PDF_TEXT_CHARS] or '(none)'}")
+            f"Visible text:\n{body[:MAX_PDF_TEXT_CHARS] or '(none - the page is built by scripts)'}")
 
 def explain_html(sender, data, filename, caption):
     info = read_html(data)
@@ -893,12 +921,14 @@ def handle_interactive(sender, message):
     safe_send_text(sender, MENU_HELP.get(choice, MSG["type"]))
 
 def over_limit(sender, kind):
+    """True (and tells the user) when today's limit for this feature is used up. Admins are exempt."""
     if sender in ADMINS or use_quota(sender, kind): return False
     safe_send_text(sender, MSG["limit"])
     return True
 
 _last_alert = 0.0
 def alert_admin(text):
+    """WhatsApp the admin about an error, at most once every 10 minutes."""
     global _last_alert
     if not ADMINS or time.time() - _last_alert < 600: return
     _last_alert = time.time()
@@ -909,6 +939,7 @@ def build_text_prompt(sender, user_text):
     return head + history_context(sender) + "User message:\n" + user_text
 
 def route_result(sender, result, lang, user_text=""):
+    """Shared by text and voice: chat / image / document."""
     kind = result.get("kind", "chat")
     if kind == "image":
         if over_limit(sender, "image"): return
@@ -928,14 +959,16 @@ def route_result(sender, result, lang, user_text=""):
 _FORMULA_OK = re.compile(r"^[A-Za-z0-9\s•·+\-−–×÷*/=^<>≤≥≠²³()\[\].,π√%]+$")
 
 def is_formula_text(t):
+    """True when the whole message is just formulas (e.g. '(a + b)² = a² + 2ab + b²')."""
     t = (t or "").strip()
     lines = [l for l in t.splitlines() if l.strip()]
     if not lines or "=" not in t or t.endswith(("=", "?")): return False
-    if re.search(r"[A-Za-z]{4,}", t): return False
+    if re.search(r"[A-Za-z]{4,}", t): return False          # real words -> a normal question
     return all(_FORMULA_OK.match(l) and re.search(r"[=+\-−–×÷*/^²³√π]", l) for l in lines)
 
 def formula_lines(t):
     return "\n".join(re.sub(r"^[ \t]*(?:[•·*]|-\s)\s*", "", l).strip() for l in t.splitlines() if l.strip())
+
 
 def handle_text(sender, message):
     user_text = message.get("text", {}).get("body", "").strip()
@@ -957,7 +990,7 @@ def handle_text(sender, message):
             safe_send_text(sender, MSG["img_fail"])
         return
 
-    if is_formula_text(user_text):
+    if is_formula_text(user_text):   # read the formulas back completely, text + voice
         send_reply(sender, formula_lines(user_text), "en")
         return
 
@@ -1012,7 +1045,7 @@ def process_message(sender, message, message_id):
         elif kind == "interactive": handle_interactive(sender, message)
         else: safe_send_text(sender, MSG["type"])
         asked_menu = kind == "text" and message.get("text", {}).get("body", "").strip().lower().lstrip("/") in ("menu", "help", "start")
-        if is_new and kind != "interactive" and not asked_menu:
+        if is_new and kind != "interactive" and not asked_menu:   # first time we see this person: show the menu once
             try: send_menu(sender)
             except Exception as e: log.warning(f"menu failed: {e}")
     except UnsupportedFile:
@@ -1027,7 +1060,7 @@ def process_message(sender, message, message_id):
         alert_admin(f"{type(e).__name__}: {e}")
 
 
-# ---------- PRIVACY & TERMS WEB PAGES ----------
+# ---------- PRIVACY POLICY (served at /privacy) ----------
 PRIVACY_UPDATED = "November 10, 2026"
 _PRIVACY_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1043,16 +1076,67 @@ p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}
 </style></head><body><main>
 <h1>Privacy Policy</h1>
 <p class="muted">@@BIZ@@ &middot; Last updated: @@DATE@@</p>
+
 <h2>1. About this service</h2>
-<p>@@BIZ@@ is an AI assistant operating via WhatsApp.</p>
-<h2>2. Contact</h2>
+<p>@@BIZ@@ ("we", "us") is an AI assistant that works inside WhatsApp. You send a message to our WhatsApp number and we reply. This policy explains what information we handle when you use it.</p>
+
+<h2>2. Information we receive</h2>
+<ul>
+<li><b>Your phone number and WhatsApp name</b>, provided by WhatsApp so we can reply to you.</li>
+<li><b>The messages you send</b>: text, voice notes, images, and PDF, Word or HTML files.</li>
+<li><b>Your language preference and usage</b>, so we can reply in your language and apply fair daily limits.</li>
+<li><b>Your last few messages and replies</b>, so the assistant can follow the conversation (see section 5).</li>
+<li><b>Technical information</b> such as message IDs and error details, which our hosting provider may keep in server logs.</li>
+</ul>
+<p>We only act on messages you send to us. We do not send promotions or unsolicited messages.</p>
+
+<h2>3. How we use it</h2>
+<ul>
+<li>To understand your message and reply in your language, as text and as a short voice message.</li>
+<li>To describe your images, summarise your files, create images you ask for, and create letters as PDF.</li>
+<li>To keep the service working, prevent duplicate replies and fix errors.</li>
+</ul>
+<p>We do not sell your information and we do not use it for advertising.</p>
+
+<h2>4. Other services that process your content</h2>
+<p>To give you a reply, your message content is sent to these providers, who handle it under their own terms and privacy policies:</p>
+<ul>
+<li><b>Meta / WhatsApp</b>: delivers messages and media between you and us.</li>
+<li><b>Google Gemini</b>: reads your text, voice, images and file contents and writes the reply.</li>
+<li><b>Google text-to-speech</b>: turns the reply text into the voice message.</li>
+<li><b>Pollinations (image generation)</b>: receives only the description of the image you asked for.</li>
+<li><b>Our hosting provider (Render)</b>: runs the service and may keep technical logs.</li>
+</ul>
+
+<h2>5. How long we keep information</h2>
+<p>We keep only a small amount of data to run the Service: your phone number, your preferred language, and your last few messages and replies, which are deleted automatically after 24 hours and used only so the assistant can follow the conversation. Daily usage counters are stored in anonymised form (no phone number) and expire after a day. Files, images and audio are handled in temporary memory or temporary files and are deleted once your reply is sent. Message IDs are held in memory only to avoid answering the same message twice and are lost when the service restarts. Technical logs kept by our hosting provider may contain your phone number and error details for a limited time set by that provider.</p>
+
+<h2>6. Your choices and deletion</h2>
+<p>You can stop using the service at any time by no longer messaging us, and you can block the number in WhatsApp. To delete your saved data immediately, send the message "delete my data" to the bot. To ask what we hold about you, or to have any data about you deleted, email us at @@EMAIL@@ with your WhatsApp number and we will respond within a reasonable time.</p>
+
+<h2>7. Security</h2>
+<p>Messages from WhatsApp are verified using Meta's signature, and data is sent over encrypted connections. No online service can be guaranteed to be completely secure.</p>
+
+<h2>8. Children</h2>
+<p>This service is not directed at children under 13, and we do not knowingly collect information from them.</p>
+
+<h2>9. AI-generated content</h2>
+<p>Replies are produced by AI and may contain mistakes. Please do not rely on them for medical, legal or financial decisions, and do not send sensitive personal documents such as passwords or bank details.</p>
+
+<h2>10. Changes</h2>
+<p>We may update this policy. The date at the top shows when it last changed.</p>
+
+<h2>11. Contact</h2>
 <p>@@BIZ@@ &middot; @@EMAIL@@</p>
 </main></body></html>"""
 
 def privacy_html():
-    email = htmllib.escape(CONTACT_EMAIL) if CONTACT_EMAIL else "[CONTACT_EMAIL]"
-    return _PRIVACY_TEMPLATE.replace("@@BIZ@@", htmllib.escape(BUSINESS_NAME)).replace("@@DATE@@", PRIVACY_UPDATED).replace("@@EMAIL@@", email)
+    email = htmllib.escape(CONTACT_EMAIL) if CONTACT_EMAIL else "[set the CONTACT_EMAIL setting]"
+    return (_PRIVACY_TEMPLATE.replace("@@BIZ@@", htmllib.escape(BUSINESS_NAME))
+            .replace("@@DATE@@", PRIVACY_UPDATED).replace("@@EMAIL@@", email))
 
+
+# ---------- TERMS OF SERVICE (served at /terms) ----------
 _TERMS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1067,16 +1151,55 @@ p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}a{color:var(--acce
 </style></head><body><main>
 <h1>Terms of Service</h1>
 <p class="muted">@@BIZ@@ &middot; Last updated: @@DATE@@</p>
-<h2>1. Contact</h2>
+
+<h2>1. Acceptance</h2>
+<p>By sending a message to @@BIZ@@ ("the Service") on WhatsApp, you agree to these terms. If you do not agree, please stop using the Service. Your use of WhatsApp is also governed by WhatsApp's own terms.</p>
+
+<h2>2. What the Service does</h2>
+<p>The Service is an AI assistant on WhatsApp. It answers questions, explains images, summarises PDF, Word and HTML files, creates images, creates letters as PDF, and replies as text and voice. It replies only to messages you send to it.</p>
+
+<h2>3. AI replies can be wrong</h2>
+<p>Replies are generated by AI and may be incomplete, outdated or incorrect, including spellings and calculations. Please check important information yourself. Do not rely on the Service for medical, legal, financial or safety decisions.</p>
+
+<h2>4. Acceptable use</h2>
+<p>You agree not to use the Service to:</p>
+<ul>
+<li>break the law or violate anyone's rights;</li>
+<li>create or share harmful, hateful, sexual, violent or misleading content, or images of real people without their permission;</li>
+<li>send malware, spam, or attempt to disrupt, overload or hack the Service;</li>
+<li>send passwords, bank details or other highly sensitive documents.</li>
+</ul>
+<p>We may refuse a request, or stop replying to a number that misuses the Service.</p>
+
+<h2>5. Your content</h2>
+<p>You keep ownership of what you send. You confirm that you have the right to send it. You allow us and the services described in our <a href="/privacy">Privacy Policy</a> to process it only to produce your reply.</p>
+
+<h2>6. Generated content</h2>
+<p>Images, letters and other content the Service creates for you are provided as is. Similar outputs may be produced for other users. You are responsible for how you use them, including checking that they are suitable and do not infringe anyone's rights.</p>
+
+<h2>7. Availability and limits</h2>
+<p>The Service is provided free and as is. It may be slow, limited (for example, image creation can take about a minute), interrupted or changed at any time. File size is limited to 10 MB, and daily usage limits apply to keep the Service available for everyone.</p>
+
+<h2>8. Liability</h2>
+<p>To the fullest extent allowed by law, we are not responsible for any loss or damage resulting from your use of, or inability to use, the Service, or from any reply it gives.</p>
+
+<h2>9. Privacy</h2>
+<p>How we handle your information is described in our <a href="/privacy">Privacy Policy</a>.</p>
+
+<h2>10. Changes and ending</h2>
+<p>We may update these terms or stop the Service at any time. The date above shows the latest version. Continuing to use the Service after a change means you accept it. You can stop at any time by no longer messaging us.</p>
+
+<h2>11. Contact</h2>
 <p>@@BIZ@@ &middot; @@EMAIL@@</p>
 </main></body></html>"""
 
 def terms_html():
-    email = htmllib.escape(CONTACT_EMAIL) if CONTACT_EMAIL else "[CONTACT_EMAIL]"
-    return _TERMS_TEMPLATE.replace("@@BIZ@@", htmllib.escape(BUSINESS_NAME)).replace("@@DATE@@", PRIVACY_UPDATED).replace("@@EMAIL@@", email)
+    email = htmllib.escape(CONTACT_EMAIL) if CONTACT_EMAIL else "[set the CONTACT_EMAIL setting]"
+    return (_TERMS_TEMPLATE.replace("@@BIZ@@", htmllib.escape(BUSINESS_NAME))
+            .replace("@@DATE@@", PRIVACY_UPDATED).replace("@@EMAIL@@", email))
 
 
-# ---------- WEBHOOK ENDPOINTS ----------
+# ---------- WEBHOOK ----------
 def valid_signature(raw, header):
     if not META_APP_SECRET: return True
     expected = "sha256=" + hmac.new(META_APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
@@ -1087,9 +1210,11 @@ def valid_signature(raw, header):
 def health(): return PlainTextResponse("Kan Paarvai AI is running")
 
 @app.get("/privacy")
+@app.get("/privacy-policy")
 def privacy(): return HTMLResponse(privacy_html())
 
 @app.get("/terms")
+@app.get("/terms-of-service")
 def terms(): return HTMLResponse(terms_html())
 
 @app.get("/webhook")
