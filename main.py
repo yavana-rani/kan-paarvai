@@ -10,6 +10,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
+import zipfile
 import html as htmllib
 from html.parser import HTMLParser
 from collections import OrderedDict
@@ -44,6 +45,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 META_APP_SECRET = os.getenv("META_APP_SECRET", "")
 BUSINESS_NAME = os.getenv("BUSINESS_NAME", "Kan Paarvai AI")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "")
+VT_API_KEY = os.getenv("VT_API_KEY", "")     # optional: VirusTotal lookup by file fingerprint (hash) only
 GRAPH_VERSION = os.getenv("GRAPH_API_VERSION", "v22.0")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-2.0-flash").split(",") if m.strip()]
@@ -146,6 +148,9 @@ DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.docu
 class UnsupportedFile(Exception): pass
 class TooBig(Exception): pass
 class EmptyFile(Exception): pass
+class BlockedContent(Exception): pass      # the AI refused the content (unsafe)
+class UnsafeFile(Exception):               # risky file: code = risky / mismatch / active
+    def __init__(self, code="risky"): super().__init__(code); self.code = code
 
 
 # ---------- FONTS ----------
@@ -367,8 +372,14 @@ def ask_gemini(contents, system=SYSTEM_PROMPT, clean=True, json_mode=False):
             cfg = dict(system_instruction=system, temperature=0.2, max_output_tokens=4096)
             if json_mode: cfg["response_mime_type"] = "application/json"
             resp = client.models.generate_content(model=model_name, contents=contents, config=types.GenerateContentConfig(**cfg))
-            text = getattr(resp,"text",None)
+            try: text = resp.text
+            except Exception: text = None
             if text: return clean_text(text) if clean else text
+            fb, cands = getattr(resp, "prompt_feedback", None), (getattr(resp, "candidates", None) or [])
+            if (fb is not None and getattr(fb, "block_reason", None)) or \
+               (cands and "SAFETY" in str(getattr(cands[0], "finish_reason", "")).upper()):
+                raise BlockedContent()
+        except BlockedContent: raise
         except Exception as e: last_err=e; log.warning(f"{model_name} failed: {e}")
     raise RuntimeError(f"All models failed: {last_err}")
 
@@ -387,6 +398,8 @@ def ask_with_lang(contents, system):
         if data.get("more"): data["more"] = clean_text(str(data["more"]))
         lang = lang or guess_lang(data.get("reply") or data.get("image_prompt") or data.get("body") or "")
         return data, (lang or DEFAULT_LANG)
+    except BlockedContent:
+        raise
     except Exception:
         reply = ask_gemini(contents)
         return {"kind":"chat","reply":reply}, guess_lang(reply)
@@ -731,6 +744,139 @@ def send_reply(to, text, lang, save=True):
     except Exception as e: log.warning(f"voice failed: {e}")
 
 
+# ---------- SAFETY ALERTS (voice + text): empty, risky/malware-like, scam-like, blocked ----------
+ALERTS = {
+    "empty": {
+        "ta": "இந்தக் கோப்பு காலியாக உள்ளது அல்லது படிக்கக்கூடிய எதுவும் இல்லை. வேறு கோப்பை அனுப்புங்கள்.",
+        "en": "This file is empty, or there is nothing readable in it. Please send another file.",
+        "hi": "यह फ़ाइल खाली है या इसमें पढ़ने लायक कुछ नहीं है। कोई और फ़ाइल भेजिए।"},
+    "risky": {
+        "ta": "எச்சரிக்கை! இது ஆபத்தான கோப்பாக இருக்கலாம். அதைத் திறக்க வேண்டாம், யாருக்கும் அனுப்ப வேண்டாம். நான் அதைப் படிக்கவில்லை.",
+        "en": "Warning! This may be a dangerous file. Do not open it and do not forward it. I did not read it.",
+        "hi": "चेतावनी! यह खतरनाक फ़ाइल हो सकती है। इसे न खोलें और किसी को न भेजें। मैंने इसे नहीं पढ़ा।"},
+    "mismatch": {
+        "ta": "எச்சரிக்கை! கோப்பின் பெயருக்கும் உள்ளே இருப்பதற்கும் பொருத்தம் இல்லை. இது பாதுகாப்பற்றதாக இருக்கலாம். திறக்க வேண்டாம்.",
+        "en": "Warning! The file name does not match what is inside. It may be unsafe. Do not open it.",
+        "hi": "चेतावनी! फ़ाइल का नाम और उसकी असली सामग्री मेल नहीं खाते। यह असुरक्षित हो सकती है। इसे न खोलें।"},
+    "active": {
+        "ta": "எச்சரிக்கை! இந்தக் கோப்புக்குள் மறைந்த நிரல் அல்லது சந்தேகத்துக்குரிய குறியீடு உள்ளது. திறக்க வேண்டாம். நான் அதைப் படிக்கவில்லை.",
+        "en": "Warning! This file has a hidden program or suspicious code inside. Do not open it. I did not read it.",
+        "hi": "चेतावनी! इस फ़ाइल के अंदर छिपा प्रोग्राम या संदिग्ध कोड है। इसे न खोलें। मैंने इसे नहीं पढ़ा।"},
+    "scam": {
+        "ta": "எச்சரிக்கை! இது மோசடிச் செய்தியாக இருக்கலாம். OTP, கடவுச்சொல், வங்கி எண் அல்லது பணத்தை யாருக்கும் கொடுக்க வேண்டாம். இணைப்பைத் தொட வேண்டாம். சந்தேகம் இருந்தால் வங்கியின் அதிகாரப்பூர்வ எண்ணை அழைக்கவும் அல்லது நம்பகமான உறவினரிடம் கேளுங்கள்.",
+        "en": "Warning! This may be a scam message. Do not share any OTP, password, bank number or money. Do not tap any link. If in doubt, call your bank on its official number or ask a trusted relative.",
+        "hi": "चेतावनी! यह धोखाधड़ी वाला संदेश हो सकता है। OTP, पासवर्ड, बैंक नंबर या पैसे किसी को न दें। लिंक न छुएँ। संदेह हो तो बैंक के आधिकारिक नंबर पर फ़ोन करें।"},
+    "blocked": {
+        "ta": "இந்த உள்ளடக்கத்தைப் படிக்க முடியவில்லை. அது பாதுகாப்பற்றதாக இருக்கலாம்.",
+        "en": "I could not read this content. It may be unsafe.",
+        "hi": "मैं यह सामग्री नहीं पढ़ सका। यह असुरक्षित हो सकती है।"},
+    "too_big": {
+        "ta": "கோப்பு மிகப் பெரியது. 10 MB-க்குள் உள்ள கோப்பை அனுப்புங்கள்.",
+        "en": "The file is too big. Please send a file under 10 MB.",
+        "hi": "फ़ाइल बहुत बड़ी है। 10 MB से छोटी फ़ाइल भेजिए।"},
+    "type": {
+        "ta": "இந்த வகைக் கோப்பை என்னால் படிக்க முடியாது. உரை, குரல், படம், PDF, Word அல்லது HTML கோப்பை அனுப்புங்கள்.",
+        "en": "I cannot read this kind of file. Please send text, voice, a photo, or a PDF, Word or HTML file.",
+        "hi": "मैं इस तरह की फ़ाइल नहीं पढ़ सकता। टेक्स्ट, आवाज़, फ़ोटो, PDF, Word या HTML फ़ाइल भेजिए।"},
+}
+WARNING_CODES = {"risky", "mismatch", "active", "scam", "blocked"}
+
+@_safe(None)
+def get_lang(wa_id):
+    with _db_lock, _db() as con:
+        row = con.execute("SELECT lang FROM users WHERE wa_id=?", (wa_id,)).fetchone()
+    return row[0] if row and row[0] else None
+
+def send_alert(to, code):
+    """Warn the person in their language: text first, then a voice copy (they may not be able to read it)."""
+    lang = get_lang(to) or DEFAULT_LANG
+    table = ALERTS.get(code) or ALERTS["blocked"]
+    text = table.get(base_lang(lang)) or table["en"]
+    if code in WARNING_CODES: text = "⚠️ " + text
+    try: send_reply(to, text, lang, save=False)
+    except Exception as e:
+        log.warning(f"alert failed: {e}"); safe_send_text(to, table["en"])
+
+# --- risky files (heuristics; no scan can promise a file is safe) ---
+RISKY_EXT = {".exe", ".apk", ".bat", ".cmd", ".com", ".scr", ".msi", ".dll", ".jar", ".js", ".jse", ".vbs", ".vbe",
+             ".wsf", ".ps1", ".sh", ".lnk", ".iso", ".img", ".reg", ".hta", ".pif", ".cpl", ".docm", ".xlsm", ".pptm",
+             ".dotm", ".xlam", ".zip", ".rar", ".7z"}
+EXEC_MAGIC = (b"MZ", b"\x7fELF", b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa", b"\xcf\xfa\xed\xfe", b"#!")
+_PDF_ACTIVE = re.compile(r"/(JavaScript|JS|Launch|RichMedia|EmbeddedFile)\b")
+_HTML_RISK = re.compile(
+    r"eval\s*\(|atob\s*\(|fromCharCode|unescape\s*\(|type\s*=\s*[\"']?password|http-equiv\s*=\s*[\"']?refresh"
+    r"|<iframe[^>]*(display\s*:\s*none|width\s*=\s*[\"']?0|height\s*=\s*[\"']?0)|\.(?:exe|apk|bat|scr|msi)\b", re.I)
+
+def risky_name(filename):
+    """Every extension counts, so invoice.pdf.exe is caught."""
+    return any("." + p.strip() in RISKY_EXT for p in (filename or "").lower().split(".")[1:])
+
+def pdf_active_content(data):
+    if b"%PDF" not in data[:1024]: return "mismatch"
+    try: doc = fitz.open(stream=data, filetype="pdf")
+    except Exception: return None
+    try:
+        if doc.needs_pass: return None
+        if doc.embfile_count() > 0: return "active"
+        for x in range(1, min(doc.xref_length(), 20000)):
+            try: obj = doc.xref_object(x, compressed=False)
+            except Exception: continue
+            if _PDF_ACTIVE.search(obj): return "active"
+    except Exception: return None
+    finally:
+        try: doc.close()
+        except Exception: pass
+    return None
+
+def docx_active_content(data):
+    try: zf = zipfile.ZipFile(BytesIO(data))
+    except zipfile.BadZipFile: return "mismatch"
+    if sum(i.file_size for i in zf.infolist()) > 100 * 1024 * 1024: return "risky"     # zip bomb
+    for n in (n.lower() for n in zf.namelist()):
+        if "vbaproject" in n or "/activex/" in n or n.endswith((".exe", ".dll", ".js", ".vbs", ".bat", ".scr", ".ps1")):
+            return "active"
+    return None
+
+def html_active_content(data):
+    return "active" if _HTML_RISK.search(decode_html(data)) else None
+
+def virustotal_bad(data):
+    """Optional. Only the SHA-256 fingerprint is sent, never the file. Fails open on any problem."""
+    if not VT_API_KEY: return False
+    try:
+        r = requests.get(f"https://www.virustotal.com/api/v3/files/{hashlib.sha256(data).hexdigest()}",
+                         headers={"x-apikey": VT_API_KEY}, timeout=6)
+        if r.status_code != 200: return False
+        return r.json()["data"]["attributes"]["last_analysis_stats"].get("malicious", 0) >= 3
+    except Exception as e:
+        log.warning(f"virustotal check failed: {e}"); return False
+
+def scan_file(data, filename, kind):
+    """Run before reading. kind = pdf / docx / html / image. Raises EmptyFile or UnsafeFile(code)."""
+    if not data: raise EmptyFile()
+    if risky_name(filename) or data.startswith(EXEC_MAGIC): raise UnsafeFile("risky")
+    code = {"pdf": pdf_active_content, "docx": docx_active_content, "html": html_active_content}.get(kind, lambda d: None)(data)
+    if code: raise UnsafeFile(code)
+    if virustotal_bad(data): raise UnsafeFile("risky")
+
+# --- scam-like messages and files (English, Tamil, Hindi) ---
+_SCAM_RX = {k: re.compile(v, re.I) for k, v in {
+    "secret": r"\b(otp|one[- ]time password|cvv|pin|password|passcode|aadhaar|aadhar|card number|upi pin|kyc)\b|ஓடிபி|கடவுச்சொல்|ஆதார்|ओटीपी|पासवर्ड|आधार",
+    "threat": r"\b(blocked|suspended|deactivated|disconnected|expires?|expired|legal action|arrest|penalty|last warning|immediately|urgent)\b|முடக்க|நிறுத்தப்|கைது|அவசரம்|உடனடியாக|तुरंत|बंद",
+    "bait": r"\b(won|winner|lottery|prize|gift card|reward|cashback|refund|guaranteed returns?|double your money|loan approved|work from home)\b|பரிசு|லாட்டரி|வெற்றி பெற்|इनाम|लॉटरी",
+    "action": r"\b(click|tap|open|download|install|update)\b[^.\n]{0,40}\b(link|apk|app|here)\b|https?://\S+|bit\.ly|tinyurl|கிளிக்|லிங்க்|இணைப்பை|लिंक|क्लिक",
+    "who": r"\b(sbi|hdfc|icici|axis|paytm|phonepe|gpay|google pay|bank|police|cbi|customs|courier|income tax|electricity board|tneb|trai)\b|வங்கி|காவல்|बैंक|पुलिस",
+}.items()}
+
+def scam_reasons(text):
+    return [k for k, rx in _SCAM_RX.items() if rx.search(text or "")]
+
+def looks_like_scam(text):
+    """A warning, not a verdict: secrets/bait together with a link, a threat or another trick."""
+    m = set(scam_reasons(text))
+    return ("secret" in m and bool(m & {"action", "threat", "bait"})) or ("bait" in m and "action" in m) or len(m) >= 4
+
+
 # ---------- CRISP SUMMARIES (short first, nothing lost) ----------
 MAX_CRISP_SENTENCES = 5
 MAX_CRISP_CHARS = 600
@@ -788,6 +934,7 @@ def add_missing_facts(source, reply, more, lang):
 def send_summary(sender, header, result, lang, source=""):
     """Crisp summary first (text + voice). The rest is kept for 'more'; key numbers are never dropped."""
     reply, more = split_crisp(result.get("reply") or "", result.get("more") or "")
+    if looks_like_scam(f"{source}\n{reply}\n{more}"): send_alert(sender, "scam")      # warn first, then summarise
     if source: more = add_missing_facts(source, reply, more, lang)
     body = reply or MSG["retry"]
     if more: body += "\n" + MORE_HINT.get(base_lang(lang), MORE_HINT["en"])
@@ -1129,6 +1276,7 @@ def handle_text(sender, message):
         send_repeat(sender); return
     if cmd in ("delete my data", "delete data", "delete"):
         delete_user_data(sender); safe_send_text(sender, MSG["deleted"]); return
+    if looks_like_scam(user_text): send_alert(sender, "scam")     # warn, then still answer
     if wants_image(user_text.lower()):
         if over_limit(sender, "image"): return
         send_text(sender, "Image generate pannuren pa... 🎨 1 min wait pannunga pa")
@@ -1164,6 +1312,7 @@ def handle_image(sender, message):
     media = message["image"]
     if over_limit(sender, "file"): return
     data, _ = download_media(media["id"])
+    scan_file(data, "photo.jpg", "image")
     explain_image(sender, data, (media.get("caption") or "").strip())
 
 def handle_document(sender, message):
@@ -1175,9 +1324,11 @@ def handle_document(sender, message):
     is_docx = mime == DOCX_MIME or name.endswith(".docx")
     is_html = mime in ("text/html", "application/xhtml+xml") or name.endswith((".html", ".htm", ".xhtml"))
     is_img = mime.startswith("image/")
+    if risky_name(filename): raise UnsafeFile("risky")             # programs, scripts, macro files, archives
     if not (is_pdf or is_docx or is_html or is_img): raise UnsupportedFile(filename)
     if over_limit(sender, "file"): return
     data, _ = download_media(media["id"])
+    scan_file(data, filename, "pdf" if is_pdf else "docx" if is_docx else "html" if is_html else "image")
     if is_pdf: explain_pdf(sender, data, filename, caption)
     elif is_docx: explain_docx(sender, data, filename, caption)
     elif is_html: explain_html(sender, data, filename, caption)
@@ -1194,17 +1345,21 @@ def process_message(sender, message, message_id):
         elif kind == "image": handle_image(sender, message)
         elif kind == "document": handle_document(sender, message)
         elif kind == "interactive": handle_interactive(sender, message)
-        else: safe_send_text(sender, MSG["type"])
+        else: send_alert(sender, "type")
         asked_menu = kind == "text" and message.get("text", {}).get("body", "").strip().lower().lstrip("/") in ("menu", "help", "start")
         if is_new and kind != "interactive" and not asked_menu:   # first time we see this person: show the menu once
             try: send_menu(sender)
             except Exception as e: log.warning(f"menu failed: {e}")
+    except UnsafeFile as e:
+        send_alert(sender, e.code)
+    except BlockedContent:
+        send_alert(sender, "blocked")
     except UnsupportedFile:
-        safe_send_text(sender, MSG["type"])
+        send_alert(sender, "type")
     except TooBig:
-        safe_send_text(sender, MSG["too_big"])
+        send_alert(sender, "too_big")
     except EmptyFile:
-        safe_send_text(sender, MSG["empty"])
+        send_alert(sender, "empty")
     except Exception as e:
         log.exception(f"process_message failed: {e}")
         safe_send_text(sender, MSG["retry"])
@@ -1212,7 +1367,7 @@ def process_message(sender, message, message_id):
 
 
 # ---------- PRIVACY POLICY (served at /privacy) ----------
-PRIVACY_UPDATED = "November 13, 2026"
+PRIVACY_UPDATED = "November 14, 2026"
 _PRIVACY_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1245,6 +1400,7 @@ p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}
 <ul>
 <li>To understand your message and reply in your language, as text and as a short voice message.</li>
 <li>To describe your images, summarise your files, create images you ask for, and create letters as PDF.</li>
+<li>To warn you, by voice and text, about empty, risky or scam-like files and messages (simple checks that run on our server).</li>
 <li>To keep the service working, prevent duplicate replies and fix errors.</li>
 </ul>
 <p>We do not sell your information and we do not use it for advertising.</p>
@@ -1256,6 +1412,7 @@ p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}
 <li><b>Google Gemini</b>: reads your text, voice, images and file contents and writes the reply.</li>
 <li><b>Google text-to-speech</b>: turns the reply text into the voice message.</li>
 <li><b>Pollinations (image generation)</b>: receives only the description of the image you asked for.</li>
+<li><b>VirusTotal (optional safety check)</b>: if switched on, receives only a fingerprint (hash) of a file, never the file itself.</li>
 <li><b>Our hosting provider (Render)</b>: runs the service and may keep technical logs.</li>
 </ul>
 
