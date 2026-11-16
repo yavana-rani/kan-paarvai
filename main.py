@@ -47,8 +47,8 @@ BUSINESS_NAME = os.getenv("BUSINESS_NAME", "Kan Paarvai AI")
 CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "")
 VT_API_KEY = os.getenv("VT_API_KEY", "")     # optional: VirusTotal lookup by file fingerprint (hash) only
 GRAPH_VERSION = os.getenv("GRAPH_API_VERSION", "v22.0")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-2.5-flash-lite,gemini-2.0-flash").split(",") if m.strip()]
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")   # Google retires fixed model names (2.0 Flash was scheduled to shut down in 2026); "latest" aliases follow the current model
+FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-flash-lite-latest,gemini-2.5-flash,gemini-2.5-flash-lite").split(",") if m.strip()]
 DEFAULT_LANG = os.getenv("DEFAULT_LANG", "ta")
 LOCAL_TZ = os.getenv("LOCAL_TZ", "Asia/Kolkata")
 MAX_MEDIA_BYTES = 10 * 1024 * 1024
@@ -283,6 +283,8 @@ def init_db():
         con.execute("DELETE FROM history WHERE ts < ?", (time.time() - HISTORY_HOURS * 3600,))
         con.execute("DELETE FROM last_reply WHERE ts < ?", (time.time() - HISTORY_HOURS * 3600,))
         con.execute("DELETE FROM usage WHERE day < ?", (_today(),))
+        try: con.execute("ALTER TABLE users ADD COLUMN profile TEXT")      # which support profile the adult chose
+        except sqlite3.OperationalError: pass
 
 @_safe(False)
 def touch_user(wa_id):
@@ -722,7 +724,7 @@ def _send_voice_one(to, text, lang):
     if not pieces: return
     audio = None
     if edge_tts and TTS_ENGINE == "edge":
-        slow = "-10%" if re.search(r"[=+×÷^√π≤≥≠²³]", text) else "+0%"   # formulas a little slower = clearer
+        slow = "-10%" if (re.search(r"[=+×÷^√π≤≥≠²³]", text) or get_profile(to) in ("autism", "easy")) else "+0%"   # formulas and support profiles: a little slower = clearer
         try: audio = _synth_edge(pieces, slow)
         except Exception as e: log.warning(f"neural voice failed, using gTTS: {e}")
     if audio is None: audio = _synth_gtts(pieces)
@@ -735,12 +737,12 @@ def _send_voice_one(to, text, lang):
     finally:
         if os.path.exists(path): os.remove(path)
 
-def send_reply(to, text, lang, save=True):
-    """Text first, then a voice copy. Voice failure never blocks the text."""
+def send_reply(to, text, lang, save=True, voice_text=None):
+    """Text first, then a voice copy (voice_text = a different wording for speaking). Voice failure never blocks the text."""
     text = correct_tamil_maths_spelling((text or "").strip()) or MSG["retry"]
     send_text(to, text)
     if save: save_last(to, text, "", lang)          # lets the user say "repeat"
-    try: send_voice(to, text, lang)
+    try: send_voice(to, voice_text or text, lang)
     except Exception as e: log.warning(f"voice failed: {e}")
 
 
@@ -860,19 +862,28 @@ def scan_file(data, filename, kind):
     if virustotal_bad(data): raise UnsafeFile("risky")
 
 # --- scam-like messages and files (English, Tamil, Hindi) ---
+SCAM_MAX_CHARS = 2000      # scam messages are short; long documents (papers, reports) are not judged by keywords
+_ASK = r"(share|send|tell|give|enter|provide|confirm|submit|verify|reply with|forward)"
+_SECRET_WORDS = r"(otp|one[- ]time password|cvv|pin|password|passcode|aadhaar|aadhar|card number|upi pin|bank details)"
 _SCAM_RX = {k: re.compile(v, re.I) for k, v in {
-    "secret": r"\b(otp|one[- ]time password|cvv|pin|password|passcode|aadhaar|aadhar|card number|upi pin|kyc)\b|ஓடிபி|கடவுச்சொல்|ஆதார்|ओटीपी|पासवर्ड|आधार",
+    # a REQUEST to hand over a secret ("share your OTP", "update KYC"), not just the word "password" appearing in a text
+    "secret": rf"\b{_ASK}\b[^.\n]{{0,40}}\b{_SECRET_WORDS}\b|\b{_SECRET_WORDS}\b[^.\n]{{0,25}}\b(share|send|tell|give)\b"
+              r"|\bkyc\b[^.\n]{0,30}\b(update|verify|expire[ds]?|pending|incomplete|suspend\w*)\b|\b(update|verify|complete)\b[^.\n]{0,15}\bkyc\b"
+              r"|(ஓடிபி|OTP|கடவுச்சொல்|ஆதார்\s*எண்|பின்\s*எண்)[^.\n]{0,25}(அனுப்ப|பகிர|சொல்ல|தெரிவி|உள்ளிட|கொடு)"
+              r"|(ओटीपी|OTP|पासवर्ड|पिन|आधार)[^.\n]{0,25}(भेज|बता|शेयर|दर्ज|दे)",
     "threat": r"\b(blocked|suspended|deactivated|disconnected|expires?|expired|legal action|arrest|penalty|last warning|immediately|urgent)\b|முடக்க|நிறுத்தப்|கைது|அவசரம்|உடனடியாக|तुरंत|बंद",
     "bait": r"\b(won|winner|lottery|prize|gift card|reward|cashback|refund|guaranteed returns?|double your money|loan approved|work from home)\b|பரிசு|லாட்டரி|வெற்றி பெற்|इनाम|लॉटरी",
     "action": r"\b(click|tap|open|download|install|update)\b[^.\n]{0,40}\b(link|apk|app|here)\b|https?://\S+|bit\.ly|tinyurl|கிளிக்|லிங்க்|இணைப்பை|लिंक|क्लिक",
     "who": r"\b(sbi|hdfc|icici|axis|paytm|phonepe|gpay|google pay|bank|police|cbi|customs|courier|income tax|electricity board|tneb|trai)\b|வங்கி|காவல்|बैंक|पुलिस",
 }.items()}
+_NEGATED = re.compile(r"\b(do not|don't|dont|never|not)\s+(share|send|tell|give|enter|provide|forward)\b", re.I)
 
 def scam_reasons(text):
-    return [k for k, rx in _SCAM_RX.items() if rx.search(text or "")]
+    text = _NEGATED.sub(" ", text or "")          # "never share your OTP" is advice, not a request
+    return [k for k, rx in _SCAM_RX.items() if rx.search(text)]
 
 def looks_like_scam(text):
-    """A warning, not a verdict: secrets/bait together with a link, a threat or another trick."""
+    """A warning, not a verdict: a request for a secret or bait, together with a link, a threat or another trick."""
     m = set(scam_reasons(text))
     return ("secret" in m and bool(m & {"action", "threat", "bait"})) or ("bait" in m and "action" in m) or len(m) >= 4
 
@@ -934,7 +945,8 @@ def add_missing_facts(source, reply, more, lang):
 def send_summary(sender, header, result, lang, source=""):
     """Crisp summary first (text + voice). The rest is kept for 'more'; key numbers are never dropped."""
     reply, more = split_crisp(result.get("reply") or "", result.get("more") or "")
-    if looks_like_scam(f"{source}\n{reply}\n{more}"): send_alert(sender, "scam")      # warn first, then summarise
+    scan = (source if len(source) <= SCAM_MAX_CHARS else "") + f"\n{reply}\n{more}"      # long documents are not keyword-judged
+    if looks_like_scam(scan): send_alert(sender, "scam")      # warn first, then summarise
     if source: more = add_missing_facts(source, reply, more, lang)
     body = reply or MSG["retry"]
     if more: body += "\n" + MORE_HINT.get(base_lang(lang), MORE_HINT["en"])
@@ -953,6 +965,217 @@ def send_repeat(sender):
     if not last or not last.get("reply"):
         safe_send_text(sender, MSG["norepeat"]); return
     send_reply(sender, last["reply"], last["lang"], save=False)
+
+
+# ---------- SUPPORT PROFILES: autism support + Easy Read (for parents, teachers, caregivers) ----------
+# Rules: the adult is the user; no child's name is stored; routines and stories are expert-approved templates
+# (nothing from the library is served until SUPPORT_APPROVED lists it, or ALLOW_DRAFT_TEMPLATES=1 for the review phase);
+# the AI never invents stories or routines; formatting of the adult's own routine is deterministic.
+SUPPORT_APPROVED = {x.strip().upper() for x in os.getenv("SUPPORT_APPROVED", "").split(",") if x.strip()}   # e.g. "R1,R2,S1" or "ALL"
+ALLOW_DRAFT_TEMPLATES = os.getenv("ALLOW_DRAFT_TEMPLATES", "0") == "1"                                       # only for the educator review phase
+MAX_ROUTINE_STEPS = 10
+
+ROUTINES = [  # DRAFT - to be reviewed by a special educator before families use them
+    ("R1", "காலை நேர வழக்கம்", ["எழுந்திரு", "கழிப்பறைக்குப் போ", "பல் துலக்கு", "முகம் கழுவு", "உடை மாற்று", "காலை உணவு சாப்பிடு"]),
+    ("R2", "பல் துலக்குதல்", ["பிரஷ்ஷை எடு", "சிறிது பேஸ்ட் வை", "மேல் பற்களைத் துலக்கு", "கீழ் பற்களைத் துலக்கு", "தண்ணீரால் வாய் கொப்பளி", "பிரஷ்ஷைக் கழுவி வை"]),
+    ("R3", "கை கழுவுதல்", ["குழாயைத் திற", "கைகளை நனை", "சோப்பு போடு", "இரு கைகளையும் தேய்", "தண்ணீரால் கழுவு", "துண்டால் கை துடை"]),
+    ("R4", "குளியல்", ["துண்டையும் உடையையும் எடு", "குளியலறைக்குப் போ", "உடலை நனை", "சோப்பு போடு", "தண்ணீரால் கழுவு", "துண்டால் துடை", "உடை அணி"]),
+    ("R5", "உணவு சாப்பிடுதல்", ["கை கழுவு", "மேசையில் உட்கார்", "தட்டில் உணவு வாங்கு", "மெதுவாகச் சாப்பிடு", "தட்டை எடுத்து வை", "கை, வாய் கழுவு"]),
+    ("R6", "பள்ளிக்குப் புறப்படுதல்", ["சீருடை அணி", "புத்தகப் பையை எடு", "தண்ணீர் பாட்டிலை எடு", "காலணி அணி", "“போய் வருகிறேன்” என்று சொல்", "பள்ளிக்குப் போ"]),
+    ("R7", "பள்ளியிலிருந்து வீடு திரும்புதல்", ["வீட்டுக்கு வா", "காலணியைக் கழற்று", "பையை இடத்தில் வை", "கை, கால் கழுவு", "சிறிது ஓய்வெடு"]),
+    ("R8", "வீட்டுப்பாடம் செய்தல்", ["மேசையில் உட்கார்", "புத்தகத்தை எடு", "வீட்டுப்பாடத்தைப் பார்", "ஒவ்வொன்றாக எழுது", "முடித்ததும் புத்தகத்தை மூடு", "பையில் வை"]),
+    ("R9", "தூங்கப் போவது", ["பல் துலக்கு", "கழிப்பறைக்குப் போ", "இரவு உடை அணி", "படுக்கையில் படு", "விளக்கை அணை", "கண்களை மூடு"]),
+    ("R10", "மருத்துவரிடம் போவது", ["அம்மா அல்லது அப்பாவுடன் செல்", "காத்திருக்கும் இடத்தில் உட்கார்", "பெயர் அழைக்கும்வரை காத்திரு", "மருத்துவர் பார்ப்பார்", "மருத்துவர் சொல்வதைக் கேள்", "வீட்டுக்குத் திரும்பு"]),
+    ("R11", "முடி வெட்டுதல்", ["கடைக்குப் போ", "நாற்காலியில் உட்கார்", "துணி போர்த்துவார்கள்", "முடி வெட்டுவார்கள்", "அசையாமல் இரு", "முடிந்ததும் எழுந்திரு"]),
+    ("R12", "கடைக்குப் போவது", ["பட்டியலை எடு", "அம்மா அல்லது அப்பாவின் கையைப் பிடி", "பொருட்களைப் பார்", "கேட்டுவிட்டு எடு", "வரிசையில் நில்", "பணம் கொடு", "வீட்டுக்குத் திரும்பு"]),
+    ("R13", "பேருந்தில் பயணம்", ["நிறுத்தத்தில் காத்திரு", "பேருந்து நிற்கும்வரை பொறு", "மெதுவாக ஏறு", "இருக்கையில் உட்கார்", "நிறுத்தம் வந்ததும் எழு", "மெதுவாக இறங்கு"]),
+    ("R14", "சாலையைக் கடப்பது", ["நடைபாதையில் நில்", "வலமும் இடமும் பார்", "வண்டிகள் நின்றபின் மட்டும் கட", "பெரியவரின் கையைப் பிடி", "மெதுவாக நட"]),
+    ("R15", "கழிப்பறை பயன்பாடு", ["கழிப்பறைக்குப் போ", "கதவை மூடு", "உடையை இறக்கு", "பயன்படுத்து", "தண்ணீர் ஊற்று", "உடையை அணி", "கை கழுவு"]),
+    ("R16", "விழாவுக்குப் போவது", ["புதிய இடம்; நிறையப் பேர் இருப்பார்கள்", "வணக்கம் சொல்", "பரிசைக் கொடு", "இடத்தில் உட்கார்", "சத்தம் அதிகமானால் அம்மா அல்லது அப்பாவிடம் சொல்", "உணவு சாப்பிடு", "நன்றி சொல்லிப் புறப்படு"]),
+    ("R17", "சத்தம் அதிகமாக இருக்கும்போது", ["அம்மா அல்லது அப்பாவிடம் “சத்தம் அதிகம்” என்று சொல்", "அமைதியான இடத்துக்குப் போ", "மெதுவாக மூச்சை இழு", "மெதுவாக மூச்சை விடு", "தண்ணீர் குடி", "தயாரானதும் திரும்பு"]),
+    ("R18", "பள்ளி நாள் அட்டவணை", ["காலை எழுந்திரு", "பள்ளிக்குப் போ", "வகுப்பு", "மதிய உணவு", "வகுப்பு", "வீடு திரும்பு", "விளையாட்டு", "வீட்டுப்பாடம்", "இரவு உணவு", "தூக்கம்"]),
+    ("R19", "வரிசையில் காத்திருத்தல்", ["வரிசையில் நில்", "என் முறை வரும்வரை காத்திரு", "மற்றவர்களைப் பார்", "என் முறை வந்ததும் செய்", "நன்றி சொல்"]),
+    ("R20", "உடை அணிதல்", ["உள்ளாடை அணி", "சட்டை அணி", "கால்சட்டை அல்லது பாவாடை அணி", "காலுறை அணி", "காலணி அணி", "கண்ணாடியில் பார்"]),
+]
+STORIES = [  # DRAFT - first person, calm, literal; to be reviewed by a special educator before families use them
+    ("S1", "நான் பள்ளிக்குப் போகிறேன்", ["தினமும் காலையில் நான் பள்ளிக்குப் போகிறேன்.", "பள்ளியில் ஆசிரியர்களும் நண்பர்களும் இருப்பார்கள்.", "சில நேரம் வகுப்பில் சத்தம் இருக்கலாம்.", "அது இயல்பானது.", "எனக்குச் சிரமமாக இருந்தால் ஆசிரியரிடம் சொல்லலாம்.", "மாலையில் நான் வீட்டுக்குத் திரும்புவேன்."]),
+    ("S2", "வரிசையில் காத்திருப்பது", ["சில இடங்களில் எல்லோரும் வரிசையில் நிற்பார்கள்.", "ஒவ்வொருவருக்கும் தன் முறை வரும்.", "என் முறை வரும்வரை நான் காத்திருப்பேன்.", "காத்திருக்கும்போது நான் மூச்சை மெதுவாக இழுத்து விடலாம்.", "என் முறை வந்ததும் நான் செய்யலாம்.", "காத்திருந்ததற்காக நான் பெருமைப்படலாம்."]),
+    ("S3", "மருத்துவரிடம் போவது", ["சில நேரம் நான் மருத்துவரிடம் போவேன்.", "மருத்துவர் எனக்கு உதவுவார்.", "முதலில் நான் காத்திருக்கும் இடத்தில் உட்காருவேன்.", "என் பெயர் அழைக்கப்படும்.", "மருத்துவர் என்னைப் பார்த்துக் கேள்விகள் கேட்பார்.", "அம்மா அல்லது அப்பா என்னுடன் இருப்பார்.", "பிறகு நாங்கள் வீட்டுக்குத் திரும்புவோம்."]),
+    ("S4", "முடி வெட்டுவது", ["சில நேரம் எனக்கு முடி வெட்டுவார்கள்.", "நான் நாற்காலியில் உட்காருவேன்.", "என் மேல் ஒரு துணி போர்த்துவார்கள்.", "கத்தரிக்கோல் சத்தம் கேட்கலாம்.", "முடி வெட்டுவது பொதுவாக வலிக்காது.", "நான் முடிந்தவரை அசையாமல் இருக்க முயல்வேன்.", "முடிந்ததும் நான் எழுந்திருப்பேன்."]),
+    ("S5", "சத்தம் அதிகமான இடம்", ["சில இடங்களில் சத்தம் அதிகமாக இருக்கும்.", "சத்தம் எனக்குப் பிடிக்காமல் இருக்கலாம்.", "அது பரவாயில்லை.", "நான் அம்மா அல்லது அப்பாவிடம் “சத்தம் அதிகம்” என்று சொல்லலாம்.", "நாங்கள் அமைதியான இடத்துக்குப் போகலாம்.", "சிறிது நேரம் கழித்து நான் நன்றாக உணர்வேன்."]),
+    ("S6", "திட்டம் மாறினால்", ["சில நேரம் நாளின் திட்டம் மாறலாம்.", "அது அவ்வப்போது நடக்கும்.", "திட்டம் மாறினால் பெரியவர்கள் எனக்குச் சொல்வார்கள்.", "புதிய திட்டத்தில் என்ன நடக்கும் என்று நான் கேட்கலாம்.", "நான் மூச்சை மெதுவாக இழுத்து விடலாம்.", "மாற்றம் வந்தாலும் நான் பாதுகாப்பாக இருக்கிறேன்."]),
+    ("S7", "நண்பருடன் விளையாடுவது", ["நான் நண்பர்களுடன் விளையாடலாம்.", "விளையாட்டில் ஒவ்வொருவருக்கும் முறை உண்டு.", "என் முறை வரும்வரை நான் காத்திருப்பேன்.", "பொம்மைகளை மற்றவர்களுடன் பகிர்ந்துகொள்ளலாம்.", "நான் விளையாட விரும்பவில்லை என்றால் “இப்போது வேண்டாம்” என்று சொல்லலாம்.", "விளையாடி முடிந்ததும் பொம்மைகளை எடுத்து வைப்பேன்."]),
+    ("S8", "எனக்குக் கோபம் வந்தால்", ["சில நேரம் எனக்குக் கோபம் வரலாம்.", "கோபம் வருவது எல்லோருக்கும் நடக்கும்.", "கோபம் வந்தால் நான் நிற்கலாம்.", "நான் மூச்சை மெதுவாக இழுத்து விடலாம்.", "“எனக்குக் கோபமாக இருக்கிறது” என்று பெரியவரிடம் சொல்லலாம்.", "சிறிது நேரத்தில் கோபம் குறையும்."]),
+    ("S9", "ஊசி போடுவது", ["சில நேரம் மருத்துவர் ஊசி போடுவார்.", "ஊசி என்னை ஆரோக்கியமாக வைத்திருக்க உதவும்.", "ஊசி போடும்போது சிறிது வலிக்கலாம்.", "அது சிறிது நேரத்தில் முடிந்துவிடும்.", "அம்மா அல்லது அப்பா என்னுடன் இருப்பார்.", "ஊசி போட்ட பிறகு நான் ஓய்வெடுக்கலாம்."]),
+    ("S10", "பேருந்தில் பயணம்", ["சில நேரம் நான் பேருந்தில் பயணம் செய்வேன்.", "நான் நிறுத்தத்தில் காத்திருப்பேன்.", "பேருந்து வந்ததும் மெதுவாக ஏறுவேன்.", "நான் இருக்கையில் உட்காருவேன்.", "பேருந்தில் சத்தமும் கூட்டமும் இருக்கலாம்.", "என் நிறுத்தம் வந்ததும் நான் மெதுவாக இறங்குவேன்."]),
+]
+STEP_EMOJI = [("முடி வெட்", "✂️"), ("முடிவெட்", "✂️"), ("பல்", "🪥"), ("பிரஷ்", "🪥"), ("குழாய்", "🚰"), ("தண்ணீர்", "🚰"), ("சோப்பு", "🧼"), ("கழுவு", "🧼"),
+              ("குளி", "🚿"), ("சீருடை", "👕"), ("சட்டை", "👕"), ("உடை", "👕"), ("காலணி", "👟"), ("செருப்பு", "👟"), ("புத்தக", "📚"), ("பை", "🎒"),
+              ("சாப்பி", "🍽️"), ("உணவு", "🍽️"), ("தட்டு", "🍽️"), ("பள்ளி", "🏫"), ("தூங்", "🛏️"), ("படுக்கை", "🛏️"), ("விளக்கு", "💡"),
+              ("மருத்துவ", "🩺"), ("பேருந்து", "🚌"), ("சாலை", "🚦"), ("கடை", "🛒"), ("பணம்", "💰"), ("காத்திரு", "⏳"), ("உட்கார", "💺"),
+              ("வீடு", "🏠"), ("மூச்சு", "🌬️"), ("குடி", "💧"), ("கழிப்பறை", "🚻"), ("எழு", "⏰"), ("அம்மா", "👩"), ("அப்பா", "👨")]
+PROFILE_NAMES = {"vision": "vision", "பார்வை": "vision", "autism": "autism", "ஆட்டிசம்": "autism",
+                 "easy": "easy", "easy read": "easy", "எளிய வாசிப்பு": "easy", "எளிய": "easy"}
+PROFILE_MSG = {
+    "vision": {"ta": "பார்வை உதவி இயக்கப்பட்டது. படம் அல்லது கோப்பை அனுப்புங்கள்; சுருக்கமாகக் குரலில் சொல்வேன்.",
+               "en": "Vision support is on. Send a photo or a file and I will tell you what is in it, briefly, by voice."},
+    "autism": {"ta": "ஆட்டிசம் உதவி இயக்கப்பட்டது. இது பெற்றோருக்கும் ஆசிரியருக்கும். தினசரி வழக்கங்களுக்கு “வழக்கங்கள்” என்றும், கதைகளுக்கு “கதைகள்” என்றும் அனுப்புங்கள். உங்கள் சொந்த வரிசைக்கு “வழக்கம்: எழு, பல் துலக்கு, சாப்பிடு” என்று அனுப்புங்கள். குழந்தையின் பெயரை அனுப்ப வேண்டாம்.",
+               "en": "Autism support is on. It is for parents and teachers. Send “routines” or “stories”. For your own order, send “routine: wake up, brush teeth, eat”. Please do not send a child's name."},
+    "easy": {"ta": "எளிய வாசிப்பு இயக்கப்பட்டது. எந்த எழுத்தையும் அனுப்புங்கள்; எளிய சொற்களில் மாற்றித் தருவேன். குழந்தையின் பெயரை அனுப்ப வேண்டாம்.",
+             "en": "Easy Read is on. Send any text and I will write it in simple words. Please do not send a child's name."},
+}
+AUTISM_HELP = {"ta": "வழக்கங்களைப் பார்க்க “வழக்கங்கள்” என்றும், கதைகளைப் பார்க்க “கதைகள்” என்றும் அனுப்புங்கள். சொந்த வரிசைக்கு “வழக்கம்: …” என்று எழுதுங்கள். வேறு உதவிக்கு “profile” என்று அனுப்புங்கள்.",
+               "en": "Send “routines” or “stories”. For your own order write “routine: …”. For other help send “profile”."}
+NOT_REVIEWED = {"ta": "இவை இன்னும் சிறப்புக் கல்வி ஆசிரியரின் மதிப்பாய்வில் உள்ளன. உங்கள் சொந்த வரிசையை “வழக்கம்: …” என்று அனுப்பலாம்.",
+                "en": "These are still being reviewed by a special educator. You can send your own order as “routine: …”."}
+NO_SUCH = {"ta": "அந்த எண் இல்லை. “வழக்கங்கள்” அல்லது “கதைகள்” என்று அனுப்பிப் பட்டியலைப் பாருங்கள்.", "en": "No such number. Send “routines” or “stories” to see the list."}
+
+EASY_RULES = ("Write in Easy Read: very short sentences (about 8 words or fewer), one idea per line, common everyday words, no jargon, "
+              "no idioms; explain any hard word in brackets; keep every date, time, amount, number, name and phone number exactly; use short lines like a list. ")
+AUTISM_RULES = ("The reader may be a parent or teacher of an autistic child. Use calm, literal, concrete words; no idioms, sarcasm or figurative language; "
+                "say exactly what will happen, where and when; avoid frightening words unless they are needed; keep the same structure every time. ")
+EASY_PROMPT = ('Reply with ONLY one JSON object: {"language": "", "reply": ""} ' + EASY_RULES +
+               "Rewrite the user's text in Easy Read, in the same language. Do not add anything that is not in the text. " + STYLE_RULES + LANG_HINT + TAMIL_HINT)
+
+@_safe("vision")
+def get_profile(wa_id):
+    with _db_lock, _db() as con:
+        row = con.execute("SELECT profile FROM users WHERE wa_id=?", (wa_id,)).fetchone()
+    return row[0] if row and row[0] in ("vision", "autism", "easy") else "vision"
+
+@_safe(None)
+def set_profile(wa_id, profile):
+    with _db_lock, _db() as con, con:
+        con.execute("UPDATE users SET profile=? WHERE wa_id=?", (profile, wa_id))
+
+def profile_rules(sender):
+    """Extra wording rules for file/photo summaries, depending on the adult's chosen profile."""
+    return {"autism": AUTISM_RULES, "easy": EASY_RULES}.get(get_profile(sender), "")
+
+def _ul(sender):
+    l = base_lang(get_lang(sender) or DEFAULT_LANG)
+    return l if l in ("ta", "en") else "en"
+
+def _approved(item_id):
+    return ALLOW_DRAFT_TEMPLATES or "ALL" in SUPPORT_APPROVED or item_id.upper() in SUPPORT_APPROVED
+
+def step_emoji(step):
+    for key, emo in STEP_EMOJI:
+        if key in step: return emo
+    return ""
+
+def format_routine(title, steps):
+    """Fixed layout every time (predictability matters for autistic children). Returns (text, spoken)."""
+    steps = [s.strip(" .!।") for s in steps if s.strip(" .!।")][:MAX_ROUTINE_STEPS]
+    ta = guess_lang(" ".join(steps) + " " + (title or "")) == "ta"
+    first, then, last, done = ("முதலில்", "பிறகு", "கடைசியில்", "முடிந்தது!") if ta else ("First", "Then", "Last", "Done!")
+    lines = [f"📋 {title}"] if title else []
+    for i, st in enumerate(steps, 1):
+        e = step_emoji(st); lines.append(f"{i}. {e + ' ' if e else ''}{st}")
+    lines.append("✅ " + done)
+    spoken = [f"{title}." if title else ""]
+    for i, st in enumerate(steps):
+        word = first if i == 0 else (last if i == len(steps) - 1 and len(steps) > 1 else then)
+        spoken.append(f"{word}, {st}.")
+    spoken.append(done)
+    return "\n".join(lines), " ".join(x for x in spoken if x)
+
+def parse_own_routine(raw):
+    m = re.match(r"^\s*(routine|make|schedule|வழக்கம்|அட்டவணை)\s*[:：\-–]\s*(.+)$", raw or "", flags=re.I | re.S)
+    if not m: return None
+    steps = [p.strip()[:60] for p in re.split(r"[,;\n،|]+|->|→", m.group(2)) if p.strip()]
+    return steps[:MAX_ROUTINE_STEPS] or None
+
+def _lookup(items, item_id):
+    return next((it for it in items if it[0].upper() == item_id.upper()), None)
+
+def send_list(sender, kind):
+    items = ROUTINES if kind == "R" else STORIES
+    lang = _ul(sender)
+    shown = [f"{i} – {t}" for i, t, _ in items if _approved(i)]
+    if not shown:
+        send_reply(sender, NOT_REVIEWED[lang], lang, save=False); return
+    head = ("வழக்கங்கள்" if lang == "ta" else "Routines") if kind == "R" else ("கதைகள்" if lang == "ta" else "Stories")
+    hint = ("எண்ணை அனுப்புங்கள், எ.கா. " if lang == "ta" else "Send the number, e.g. ") + ("R1" if kind == "R" else "S1")
+    send_reply(sender, head + ":\n" + "\n".join(shown) + "\n" + hint, lang, save=False)
+
+def send_item(sender, kind, n):
+    lang = _ul(sender)
+    item = _lookup(ROUTINES if kind == "R" else STORIES, f"{kind}{n}")
+    if not item: send_reply(sender, NO_SUCH[lang], lang, save=False); return
+    if not _approved(item[0]): send_reply(sender, NOT_REVIEWED[lang], lang, save=False); return
+    if kind == "R":
+        text, spoken = format_routine(item[1], item[2]); send_reply(sender, text, "ta", voice_text=spoken)
+    else:
+        send_reply(sender, f"📖 {item[1]}\n" + "\n".join(item[2]), "ta", voice_text=item[1] + ". " + " ".join(item[2]))
+
+def send_profile_menu(to):
+    graph_post("messages", {"messaging_product": "whatsapp", "to": to, "type": "interactive", "interactive": {
+        "type": "button", "body": {"text": "யாருக்காக உதவி வேண்டும்? பெற்றோர் அல்லது ஆசிரியர் தேர்ந்தெடுக்கவும்."},
+        "action": {"buttons": [
+            {"type": "reply", "reply": {"id": "prof_vision", "title": "👁 பார்வை உதவி"}},
+            {"type": "reply", "reply": {"id": "prof_autism", "title": "🧩 ஆட்டிசம் உதவி"}},
+            {"type": "reply", "reply": {"id": "prof_easy", "title": "📘 எளிய வாசிப்பு"}}]}}})
+
+def set_profile_and_confirm(sender, profile):
+    if profile not in PROFILE_MSG: profile = "vision"
+    set_profile(sender, profile)
+    lang = _ul(sender)
+    send_reply(sender, PROFILE_MSG[profile][lang], lang, save=False)
+
+def handle_support_command(sender, cmd, raw):
+    """True when the message was a profile / routine / story command (handled here)."""
+    if cmd in ("profile", "profiles", "உதவி வகை"):
+        send_profile_menu(sender); return True
+    if cmd in PROFILE_NAMES:
+        set_profile_and_confirm(sender, PROFILE_NAMES[cmd]); return True
+    if cmd in ("routines", "routine", "வழக்கங்கள்", "வழக்கம்"):
+        send_list(sender, "R"); return True
+    if cmd in ("stories", "story", "கதைகள்", "கதை"):
+        send_list(sender, "S"); return True
+    m = re.fullmatch(r"(?:r|routine|வழக்கம்)\s*(\d{1,2})", cmd)
+    if m: send_item(sender, "R", m.group(1)); return True
+    m = re.fullmatch(r"(?:s|story|கதை)\s*(\d{1,2})", cmd)
+    if m: send_item(sender, "S", m.group(1)); return True
+    steps = parse_own_routine(raw)
+    if steps:
+        ta = guess_lang(" ".join(steps)) == "ta"
+        text, spoken = format_routine("என் வழக்கம்" if ta else "My routine", steps)
+        send_reply(sender, text, "ta" if ta else "en", voice_text=spoken); return True
+    return False
+
+def easy_read_text(sender, text, extra=None, counted=False):
+    """Rewrite the adult's own text in Easy Read (AI simplifies; it never invents anything)."""
+    if not counted and over_limit(sender, "chat"): return
+    ul = get_lang(sender)
+    contents = [extra if extra is not None else f"Text:\n{text}"] + ([f"User's usual language code: {ul}."] if ul else [])
+    result, lang = ask_with_lang(contents, EASY_PROMPT)
+    reply = (result.get("reply") or "").strip() or MSG["retry"]
+    if text:
+        facts = add_missing_facts(text, reply, "", lang)       # dates, amounts, times, phone numbers are never lost
+        if facts: reply += "\n" + facts
+    send_reply(sender, reply, lang)
+
+def profile_fallback(sender, user_text):
+    """In the autism and Easy Read profiles free text stays on those tasks (no general chat or image making)."""
+    prof = get_profile(sender)
+    if prof == "autism":
+        lang = _ul(sender); send_reply(sender, AUTISM_HELP[lang], lang, save=False); return True
+    if prof == "easy":
+        easy_read_text(sender, user_text); return True
+    return False
+
+def profile_audio(sender, message):
+    prof = get_profile(sender)
+    if prof == "autism":
+        lang = _ul(sender); send_reply(sender, AUTISM_HELP[lang], lang, save=False); return True
+    if prof == "easy":
+        if over_limit(sender, "chat"): return True
+        data, mime = download_media(message["audio"]["id"])
+        part = types.Part.from_bytes(data=data, mime_type=mime or "audio/ogg")
+        easy_read_text(sender, "", extra=part, counted=True)    # the daily limit was already counted above
+        return True
+    return False
 
 
 # ---------- IMAGE GENERATION ----------
@@ -1004,7 +1227,7 @@ def prepare_image(data):
 def explain_image(sender, data, caption):
     jpeg = prepare_image(data)
     part = types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")
-    result, lang = ask_with_lang([part, f"Caption: {caption}" if caption else "No caption."], IMAGE_PROMPT)
+    result, lang = ask_with_lang([part, f"Caption: {caption}" if caption else "No caption."], IMAGE_PROMPT + profile_rules(sender))
     send_summary(sender, "", result, lang)
 
 
@@ -1054,13 +1277,13 @@ def explain_pdf(sender, data, filename, caption):
     contents = ([*image_parts, f"These are {len(image_parts)} sample pages, spread across a {pages}-page PDF."]
                 if image_parts else [f"Document text:\n{text}"])
     contents = list(contents) + [f"Caption: {caption}" if caption else "No caption."]
-    result, lang = ask_with_lang(contents, DOC_PROMPT)
+    result, lang = ask_with_lang(contents, DOC_PROMPT + profile_rules(sender))
     header = f"📄 {filename} ({pages} page{'s' if pages != 1 else ''})"
     send_summary(sender, header, result, lang, source=text)
 
 def explain_docx(sender, data, filename, caption):
     text = read_docx(data)
-    result, lang = ask_with_lang([f"Document text:\n{text}", f"Caption: {caption}" if caption else "No caption."], DOC_PROMPT)
+    result, lang = ask_with_lang([f"Document text:\n{text}", f"Caption: {caption}" if caption else "No caption."], DOC_PROMPT + profile_rules(sender))
     send_summary(sender, f"📝 {filename}", result, lang, source=text)
 
 
@@ -1126,7 +1349,7 @@ def read_html(data):
 
 def explain_html(sender, data, filename, caption):
     info = read_html(data)
-    result, lang = ask_with_lang([f"HTML page summary:\n{info}", f"Caption: {caption}" if caption else "No caption."], HTML_PROMPT)
+    result, lang = ask_with_lang([f"HTML page summary:\n{info}", f"Caption: {caption}" if caption else "No caption."], HTML_PROMPT + profile_rules(sender))
     send_summary(sender, f"🌐 {filename}", result, lang, source=info)
 
 
@@ -1208,6 +1431,8 @@ def send_menu(to):
 def handle_interactive(sender, message):
     data = message.get("interactive", {})
     choice = (data.get("button_reply") or data.get("list_reply") or {}).get("id", "")
+    if choice.startswith("prof_"):
+        set_profile_and_confirm(sender, choice[5:]); return
     safe_send_text(sender, MENU_HELP.get(choice, MSG["type"]))
 
 def over_limit(sender, kind):
@@ -1276,7 +1501,9 @@ def handle_text(sender, message):
         send_repeat(sender); return
     if cmd in ("delete my data", "delete data", "delete"):
         delete_user_data(sender); safe_send_text(sender, MSG["deleted"]); return
-    if looks_like_scam(user_text): send_alert(sender, "scam")     # warn, then still answer
+    if handle_support_command(sender, cmd, user_text): return        # profile / routines / stories / own routine
+    if len(user_text) <= SCAM_MAX_CHARS and looks_like_scam(user_text): send_alert(sender, "scam")     # warn, then still answer
+    if profile_fallback(sender, user_text): return                   # autism / Easy Read profiles stay on their own tasks
     if wants_image(user_text.lower()):
         if over_limit(sender, "image"): return
         send_text(sender, "Image generate pannuren pa... 🎨 1 min wait pannunga pa")
@@ -1299,6 +1526,7 @@ def handle_text(sender, message):
     route_result(sender, result, lang, user_text)
 
 def handle_audio(sender, message):
+    if profile_audio(sender, message): return
     if over_limit(sender, "chat"): return
     data, mime = download_media(message["audio"]["id"])
     part = types.Part.from_bytes(data=data, mime_type=mime or "audio/ogg")
@@ -1367,7 +1595,7 @@ def process_message(sender, message, message_id):
 
 
 # ---------- PRIVACY POLICY (served at /privacy) ----------
-PRIVACY_UPDATED = "November 14, 2026"
+PRIVACY_UPDATED = "November 16, 2026"
 _PRIVACY_TEMPLATE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1426,7 +1654,7 @@ p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}
 <p>Messages from WhatsApp are verified using Meta's signature, and data is sent over encrypted connections. No online service can be guaranteed to be completely secure.</p>
 
 <h2>8. Children</h2>
-<p>This service is not directed at children under 13, and we do not knowingly collect information from them.</p>
+<p>This service is for adults: parents, teachers and caregivers. It is not directed at children, who should not use it on their own. The support profiles (autism support and Easy Read) are for an adult to use for or with a child. Please do not send a child's name, photo or medical details. We store only which profile you picked; we do not track or build profiles of children, and we show no ads.</p>
 
 <h2>9. AI-generated content</h2>
 <p>Replies are produced by AI and may contain mistakes. Please do not rely on them for medical, legal or financial decisions, and do not send sensitive personal documents such as passwords or bank details.</p>
@@ -1467,7 +1695,7 @@ p,li{font-size:1rem}.muted{color:var(--muted);font-size:.9rem}a{color:var(--acce
 <p>The Service is an AI assistant on WhatsApp. It answers questions, explains images, summarises PDF, Word and HTML files, creates images, creates letters as PDF, and replies as text and voice. It replies only to messages you send to it.</p>
 
 <h2>3. AI replies can be wrong</h2>
-<p>Replies are generated by AI and may be incomplete, outdated or incorrect, including spellings and calculations. Please check important information yourself. Do not rely on the Service for medical, legal, financial or safety decisions.</p>
+<p>Replies are generated by AI and may be incomplete, outdated or incorrect, including spellings and calculations. Please check important information yourself. Do not rely on the Service for medical, legal, financial or safety decisions. Routines and stories are general support material that an educator reviews before use; they are not therapy, diagnosis or medical advice.</p>
 
 <h2>4. Acceptable use</h2>
 <p>You agree not to use the Service to:</p>
@@ -1538,9 +1766,4 @@ async def receive(request: Request, background: BackgroundTasks):
     if not valid_signature(raw, request.headers.get("X-Hub-Signature-256")):
         return PlainTextResponse("invalid signature", status_code=403)
     try: payload = json.loads(raw)
-    except ValueError: return PlainTextResponse("bad request", status_code=400)
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
-            for msg in change.get("value", {}).get("messages", []) or []:
-                background.add_task(process_message, msg.get("from"), msg, msg.get("id"))
-    return PlainTextResponse("ok")
+    except ValueError: retu
