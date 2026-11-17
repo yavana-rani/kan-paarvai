@@ -1414,8 +1414,10 @@ async def receive(request: Request, background: BackgroundTasks):
         return PlainTextResponse("invalid signature", status_code=403)
     try: payload = json.loads(raw)
     except ValueError: return PlainTextResponse("bad request", status_code=400)
-    for entry in payload.get("entry", []):
+        for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
             for msg in change.get("value", {}).get("messages", []) or []:
                 background.add_task(process_message, msg.get("from"), msg, msg.get("id"))
+            for st in change.get("value", {}).get("statuses", []) or []:
+                log.info(f"STATUS {st.get('status')} to {st.get('recipient_id')} errors={st.get('errors')}")
     return PlainTextResponse("ok")
