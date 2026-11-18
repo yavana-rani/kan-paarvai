@@ -1406,18 +1406,20 @@ def verify(request: Request):
     if VERIFY_TOKEN and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == VERIFY_TOKEN:
         return PlainTextResponse(q.get("hub.challenge", ""))
     return PlainTextResponse("forbidden", status_code=403)
-
-@app.post("/webhook")
+    @app.post("/webhook")
 async def receive(request: Request, background: BackgroundTasks):
     raw = await request.body()
     if not valid_signature(raw, request.headers.get("X-Hub-Signature-256")):
         return PlainTextResponse("invalid signature", status_code=403)
-    try: payload = json.loads(raw)
-    except ValueError: return PlainTextResponse("bad request", status_code=400)
-     for entry in payload.get("entry", []):
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        return PlainTextResponse("bad request", status_code=400)
+    for entry in payload.get("entry", []):
         for change in entry.get("changes", []):
-            for msg in change.get("value", {}).get("messages", []) or []:
+            value = change.get("value", {})
+            for msg in value.get("messages", []) or []:
                 background.add_task(process_message, msg.get("from"), msg, msg.get("id"))
-            for st in change.get("value", {}).get("statuses", []) or []:
+            for st in value.get("statuses", []) or []:
                 log.info(f"STATUS {st.get('status')} to {st.get('recipient_id')} errors={st.get('errors')}")
-    return PlainTextResponse("ok")  
+    return PlainTextResponse("ok")
