@@ -1399,14 +1399,14 @@ def privacy(): return HTMLResponse(privacy_html())
 @app.get("/terms")
 @app.get("/terms-of-service")
 def terms(): return HTMLResponse(terms_html())
-
 @app.get("/webhook")
 def verify(request: Request):
     q = request.query_params
     if VERIFY_TOKEN and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == VERIFY_TOKEN:
         return PlainTextResponse(q.get("hub.challenge", ""))
     return PlainTextResponse("forbidden", status_code=403)
-    @app.post("/webhook")
+
+@app.post("/webhook")
 async def receive(request: Request, background: BackgroundTasks):
     raw = await request.body()
     if not valid_signature(raw, request.headers.get("X-Hub-Signature-256")):
